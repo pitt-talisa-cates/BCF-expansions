@@ -1,6 +1,5 @@
 \name{mbcf-package}
 \alias{mbcf-package}
-\alias{mbcf}
 \docType{package}
 \title{
 \packageTitle{mbcf}
@@ -18,7 +17,7 @@ The DESCRIPTION file:
 \author{
 \packageAuthor{mbcf}
 
-Maintainer: \packageMaintainer{imbcf}
+Maintainer: \packageMaintainer{mbcf}
 }
 \references{
 ~~ Literature or other references for background information ~~

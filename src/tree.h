@@ -103,6 +103,7 @@ public:
   void setna(size_t na) {this->na = na;}   
   void setn0(double n0) {this->n0 = n0;}
   void setn0_xnew(double n0) {this->n0_xnew = n0;}
+  void setcoverage(double coverage) {this->coverage = coverage;}  //SHAP: see shap.h
   //get----------
   double getm() const {return mu;} 
   size_t getv() const {return v;}
@@ -110,6 +111,7 @@ public:
   size_t getna() const {return na;}
   double getn0() const {return n0;}  //return 
   double getn0_xnew() const {return n0_xnew;}
+  double getcoverage() const {return coverage;}                  //SHAP: see shap.h
   
   tree_p getp() const {return p;}  //should this be tree_cp? 
   tree_p getl() const {return l;}
@@ -162,6 +164,16 @@ private:
   double n0;
   double n0_xnew;
   //------------------------------
+  //SHAP node coverage: number of training rows routed through THIS node under
+  //the current imputed x. Maintained ONLY by update_coverage() (see shap.cpp),
+  //which is called from the SHAP block of the sampler. Nothing in the MCMC reads
+  //it, so the chain is unaffected by whether or how often it is refreshed.
+  //Deliberately kept separate from n0/n0_xnew, which ARE read by the sampler
+  //(min-node checks in bd/bdhet, x-proposal validity in fit_xprop) and whose
+  //internal-node values are only correct as of the last birth/death at that node.
+  //NB "coverage" here is TreeSHAP node coverage, not interval coverage.
+  double coverage;
+  //------------------------------
   //tree structure
   tree_p p; //parent
   tree_p l; //left child
@@ -177,4 +189,4 @@ std::istream& operator>>(std::istream&, xinfo&);
 std::ostream& operator<<(std::ostream&, const xinfo&);
 
 
-#endif
+#endif

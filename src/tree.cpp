@@ -13,9 +13,9 @@ using std::endl;
 
 //--------------------------------------------------
 // Constructors
-tree::tree(): mu(0.0),v(0),c(0), na(0), n0(0.0), n0_xnew(0.0),  p(0),l(0),r(0) {}
-tree::tree(double m): mu(m),v(0),c(0),na(0), n0(0.0), n0_xnew(0.0), p(0),l(0),r(0) {}
-tree::tree(const tree& n): mu(0.0),v(0),c(0),na(0), n0(0.0), n0_xnew(0.0),p(0),l(0),r(0) { cp(this,&n); }
+tree::tree(): mu(0.0),v(0),c(0), na(0), n0(0.0), n0_xnew(0.0), coverage(0.0),  p(0),l(0),r(0) {}
+tree::tree(double m): mu(m),v(0),c(0),na(0), n0(0.0), n0_xnew(0.0), coverage(0.0), p(0),l(0),r(0) {}
+tree::tree(const tree& n): mu(0.0),v(0),c(0),na(0), n0(0.0), n0_xnew(0.0), coverage(0.0),p(0),l(0),r(0) { cp(this,&n); }
 
 //--------------------------------------------------
 // Operators
@@ -524,6 +524,7 @@ void tree::cp(tree_p n,
   n->na = o->na;
   n->n0 = o->n0;
   n->n0_xnew = o->n0_xnew;
+  n->coverage = o->coverage;
   
   if(o->l) { //if o has children
     n->l = new tree;

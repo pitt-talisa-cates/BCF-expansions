@@ -19,6 +19,7 @@
 #include "info.h"
 #include "funs.h"
 #include "bd.h"
+#include "shap.h"
 
 using namespace Rcpp;
 
@@ -87,9 +88,33 @@ List  mbcf_cpp(NumericVector y_,
                bool use_bscale=true, //Use a half-normal hyperprior on the scale of tau.
                bool b_half_normal=true,
                
-               double min_node=5
+               double min_node=5,
+               
+               bool compute_shap=false,
+               bool shap_mod=true,
+               bool shap_con=false,
+               int  shap_thin=10,
+               bool shap_var=false,
+               bool shap_store_draws=false,
+               bool shap_check=false
 )
 {
+  // ---- mTreeSHAP controls (see shap.h) ---------------------------------------
+  // compute_shap      master switch
+  // shap_mod          SHAP for the tau(x) / b(x) trees
+  // shap_con          SHAP for the prognostic mu(x) / m(x) trees
+  // shap_thin         compute SHAP every shap_thin-th POST-BURN-IN iteration.
+  //                   Independent of the thin argument above, which only
+  //                   controls which draws get SAVED.
+  // shap_var          also accumulate the sum of squares
+  // shap_store_draws  keep every computed SHAP draw (n x p x K)
+  // shap_check        report the worst local-accuracy error per draw
+  //
+  // NB keep the argument list above free of comments. Rcpp::compileAttributes()
+  // flattens the signature onto one line, so a comment spanning more than one
+  // line gets spliced into it and generates a bogus extra parameter.
+  // ---------------------------------------------------------------------------
+  
   
   bool randeff = true;
   if(random_var_ix.n_elem == 1) {
@@ -713,6 +738,59 @@ List  mbcf_cpp(NumericVector y_,
   // Coverage-weighted variable importance for tau (b(x)) trees
   // Rows = variables (p_mod), cols = na type (0=value/SeqReg, 1=MIA1, 2=MIA2, 3=pattern)
   arma::mat vi_mod(p_mod, 4, arma::fill::zeros);
+  
+  /*****************************************************************************/
+  // mTreeSHAP accumulators
+  /*****************************************************************************/
+  
+  if(shap_thin < 1) shap_thin = 1;
+  const bool do_shap_mod = compute_shap && shap_mod;
+  const bool do_shap_con = compute_shap && shap_con;
+  if(compute_shap && !do_shap_mod && !do_shap_con)
+    Rcpp::stop("compute_shap is TRUE but both shap_mod and shap_con are FALSE");
+  
+  // number of SHAP draws: iterations mc in [burn, burn + nd*thin) with
+  // (mc - burn) %% shap_thin == 0
+  const int n_shap_max = compute_shap ? (int)std::ceil((double)(nd*thin)/(double)shap_thin) : 0;
+  int shap_ctr = 0;
+  
+  // running accumulators. The N x p stratum accumulators of the plan (4.1) are
+  // deliberately NOT allocated: for a given cell (i,j) the missingness status
+  // r_ij is fixed across iterations, so every cell belongs entirely to one
+  // stratum and sum_abs_shap_mis[i,j] is either sum_abs_shap[i,j] or 0. The
+  // stratified per-variable summaries of 4.2 are therefore recovered exactly in
+  // R from shap_mean_abs plus the missingness mask, at no memory cost.
+  arma::mat shap_sum_mod, shap_sumabs_mod, shap_sumsq_mod, phi_mod;
+  arma::mat shap_sum_con, shap_sumabs_con, shap_sumsq_con, phi_con;
+  arma::vec shap_base_mod, shap_base_con, shap_err_mod, shap_err_con;
+  arma::cube shap_draws_mod, shap_draws_con;
+  IntegerVector shap_iters(n_shap_max);
+  
+  if(do_shap_mod) {
+    shap_sum_mod.zeros(n, p_mod);
+    shap_sumabs_mod.zeros(n, p_mod);
+    phi_mod.zeros(n, p_mod);
+    shap_base_mod.zeros(n_shap_max);
+    if(shap_var) shap_sumsq_mod.zeros(n, p_mod);
+    if(shap_store_draws) shap_draws_mod.zeros(n, p_mod, n_shap_max);
+    if(shap_check) shap_err_mod.zeros(n_shap_max);
+  }
+  if(do_shap_con) {
+    shap_sum_con.zeros(n, p_con);
+    shap_sumabs_con.zeros(n, p_con);
+    phi_con.zeros(n, p_con);
+    shap_base_con.zeros(n_shap_max);
+    if(shap_var) shap_sumsq_con.zeros(n, p_con);
+    if(shap_store_draws) shap_draws_con.zeros(n, p_con, n_shap_max);
+    if(shap_check) shap_err_con.zeros(n_shap_max);
+  }
+  if(compute_shap) {
+    Rcout << "mTreeSHAP: " << n_shap_max << " draws (every " << shap_thin
+          << " post-burn-in iterations)";
+    if(do_shap_mod) Rcout << "; tau";
+    if(do_shap_con) Rcout << "; mu";
+    Rcout << std::endl;
+  }
   //std::vector<double> xaccept;
   std::vector<double> xm1_post;
   std::vector<double> xm1_est_post;
@@ -1590,6 +1668,50 @@ List  mbcf_cpp(NumericVector y_,
     
     
     ////////////
+    //mTreeSHAP
+    ////////////
+    // Placed at the very end of the iteration, so the trees, the imputed x_hat,
+    // the scales and sigma are all the current (post-update) state. Reads the
+    // forests read-only and writes only to tree::coverage, which no part of the
+    // sampler consults; the chain is therefore identical whether or not SHAP is
+    // computed, and at any shap_thin.
+    
+    if( compute_shap && (mc>=burn) && (((mc-burn) % shap_thin)==0) && (shap_ctr<n_shap_max) )  {
+      
+      shap_iters(shap_ctr) = mc;
+      
+      if(do_shap_mod) {
+        // b(x) enters y as bscale*b(x); tau(x) = (bscale1-bscale0)*b(x), which is
+        // exactly the scaling used for b_post below
+        const double scale_mod = bscale1 - bscale0;
+        const double base = mtreeshap_forest(t_mod, xi_mod, di_mod, scale_mod, phi_mod);
+        shap_base_mod(shap_ctr) = base;
+        shap_sum_mod    += phi_mod;
+        shap_sumabs_mod += arma::abs(phi_mod);
+        if(shap_var) shap_sumsq_mod += phi_mod % phi_mod;
+        if(shap_store_draws) shap_draws_mod.slice(shap_ctr) = phi_mod;
+        if(shap_check) shap_err_mod(shap_ctr) =
+          mtreeshap_max_efficiency_error(t_mod, xi_mod, di_mod, scale_mod, phi_mod, base);
+      }
+      
+      if(do_shap_con) {
+        // allfit_con = mscale*m(x), matching m_post below
+        const double scale_con = mscale;
+        const double base = mtreeshap_forest(t_con, xi_con, di_con, scale_con, phi_con);
+        shap_base_con(shap_ctr) = base;
+        shap_sum_con    += phi_con;
+        shap_sumabs_con += arma::abs(phi_con);
+        if(shap_var) shap_sumsq_con += phi_con % phi_con;
+        if(shap_store_draws) shap_draws_con.slice(shap_ctr) = phi_con;
+        if(shap_check) shap_err_con(shap_ctr) =
+          mtreeshap_max_efficiency_error(t_con, xi_con, di_con, scale_con, phi_con, base);
+      }
+      
+      shap_ctr += 1;
+    }
+    
+    
+    ////////////
     //save posterior draws  
     ////////////
     
@@ -1658,6 +1780,41 @@ List  mbcf_cpp(NumericVector y_,
   
   treef.close();
   
+  
+  // ---- assemble the mTreeSHAP output ---------------------------------------
+  // Rows are in the treatment-ordered (permuted) row order used inside C++ and
+  // columns are in permuted covariate order; mbcf() un-permutes both, exactly as
+  // it already does for vi_mod.
+  SEXP shap_mod_out = R_NilValue;
+  SEXP shap_con_out = R_NilValue;
+  if(do_shap_mod) {
+    shap_mod_out = List::create(
+      _["sum"]      = shap_sum_mod,
+      _["sum_abs"]  = shap_sumabs_mod,
+      _["sum_sq"]   = shap_var         ? wrap(shap_sumsq_mod)  : R_NilValue,
+      _["baseline"] = shap_base_mod,
+      _["draws"]    = shap_store_draws ? wrap(shap_draws_mod)  : R_NilValue,
+      _["max_err"]  = shap_check       ? wrap(shap_err_mod)    : R_NilValue);
+  }
+  if(do_shap_con) {
+    shap_con_out = List::create(
+      _["sum"]      = shap_sum_con,
+      _["sum_abs"]  = shap_sumabs_con,
+      _["sum_sq"]   = shap_var         ? wrap(shap_sumsq_con)  : R_NilValue,
+      _["baseline"] = shap_base_con,
+      _["draws"]    = shap_store_draws ? wrap(shap_draws_con)  : R_NilValue,
+      _["max_err"]  = shap_check       ? wrap(shap_err_con)    : R_NilValue);
+  }
+  SEXP shap_out = R_NilValue;
+  if(compute_shap) {
+    shap_out = List::create(
+      _["n_draws"] = shap_ctr,
+      _["thin"]    = shap_thin,
+      _["iters"]   = shap_iters,
+      _["mod"]     = shap_mod_out,
+      _["con"]     = shap_con_out);
+  }
+  
   if(bugtest){
     
     return(List::create(_["yhat_post"] = yhat_post, 
@@ -1673,7 +1830,8 @@ List  mbcf_cpp(NumericVector y_,
                         //_["min_obs_node"] = min_obs_node,
                         _["xm1_post"] = xm1_post,
                         _["xm1_post_est"] = xm1_est_post,
-                        _["vi_mod"] = vi_mod));
+                        _["vi_mod"] = vi_mod,
+                        _["shap"] = shap_out));
   }
   
   
@@ -1686,6 +1844,7 @@ List  mbcf_cpp(NumericVector y_,
                       _["bsd"] = bsd_post,
                       _["gamma"] = gamma_post, 
                       _["random_var_post"] = random_var_post,
-                      _["vi_mod"] = vi_mod
+                      _["vi_mod"] = vi_mod,
+                      _["shap"] = shap_out
   ));
-}
+}

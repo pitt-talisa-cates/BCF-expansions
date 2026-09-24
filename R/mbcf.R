@@ -89,6 +89,26 @@
 #' or "both" are HIGHLY recommended with observational data.
 #' @param use_muscale Use a half-Cauchy hyperprior on the scale of mu.
 #' @param use_tauscale Use a half-Normal prior on the scale of tau.
+#' @param compute_shap Master switch for mTreeSHAP. Default FALSE, since it adds
+#'   runtime for users who do not need attributions.
+#' @param shap_mod Compute SHAP for the treatment effect function tau(x). Default TRUE.
+#' @param shap_con Compute SHAP for the prognostic function mu(x). Default FALSE.
+#'   The two are computed independently and returned separately, so either or
+#'   both can be requested.
+#' @param shap_thin Compute SHAP every \code{shap_thin}-th post-burn-in iteration.
+#'   This is NOT \code{nthin}: \code{nthin} controls which draws of the chain are
+#'   saved, \code{shap_thin} controls how often SHAP is calculated from the chain,
+#'   and the two grids need not agree. Node cover is recomputed inside the SHAP
+#'   call and is never read by the sampler, so the chain is unaffected by the
+#'   value of \code{shap_thin}. Default 10.
+#' @param shap_var Also accumulate sums of squares, giving the posterior variance
+#'   of each SHAP value. Costs one extra N x p matrix per requested function.
+#' @param shap_store_draws Keep every computed SHAP draw (N x p x number of SHAP
+#'   draws) for credible intervals. Off by default; the memory cost is reported
+#'   as a warning when it exceeds 1 GB.
+#' @param shap_check At every SHAP draw, record the worst local-accuracy error
+#'   max_i |sum_j phi_ij + baseline - f(x_i)|. Should be ~1e-10; useful as a
+#'   regression test after changes to the tree code.
 #' @param max_ordinal_levels Maximum number of unique values allowed for a variable declared as
 #'   "ordinal" in na_reg_type. If a variable exceeds this count the function stops with an
 #'   informative message suggesting the user collapse categories. Default 25.
@@ -96,6 +116,17 @@
 #' \item{tau}{\code{nsim} by \code{n} matrix of posterior samples of individual treatment effects}
 #' \item{mu}{\code{nsim} by \code{n} matrix of posterior samples of individual treatment effects}
 #' \item{sigma}{Length \code{nsim} vector of posterior samples of sigma}
+#' \item{shap_mod, shap_con}{Present when \code{compute_shap=TRUE}. Each is a
+#'   list with \code{mean} and \code{mean_abs} (N x p posterior mean SHAP and
+#'   mean |SHAP|, in the units of \code{tau_post} / \code{mu_post}, rows and
+#'   columns in the original input order), \code{var} (if \code{shap_var}),
+#'   \code{mean_abs_obs} and \code{mean_abs_mis} (mean |SHAP| split by whether
+#'   that covariate is observed for that row),
+#'   \code{baseline} (one value per SHAP draw), \code{draws} (if
+#'   \code{shap_store_draws}), \code{max_err} (if \code{shap_check}), plus
+#'   \code{n_draws}, \code{thin} and \code{iters}. See \code{shap_summary()},
+#'   \code{plot_shap_beeswarm()}, \code{plot_shap_importance()} and
+#'   \code{plot_shap_waterfall()}.}
 #' @examples
 #'\donttest{
 #'
@@ -217,21 +248,35 @@ mbcf <- function(y,
                  na_prob_pm_mod=0.25,
                  num_breaks=10000,
                  max_ordinal_levels=25,
+                 
+                 compute_shap=FALSE,
+                 shap_mod=TRUE,
+                 shap_con=FALSE,
+                 shap_thin=10,
+                 shap_var=FALSE,
+                 shap_store_draws=FALSE,
+                 shap_check=FALSE,
+                 
                  bugtest=FALSE) {
   #browser()
   if (!is.matrix(x)) stop("x must be a matrix")
   if (!is.null(x_est) && !is.matrix(x_est)) stop("x_est must be a matrix when provided")
   
   #------------------------------------------------------------
-  # Missing y: build indicator, report to console
+  # Missing outcomes are not supported. Drawing y from its fully conditional
+  # posterior was tried and gave very poor interval coverage for tau, so the
+  # feature was dropped rather than left available as a trap. yrr is kept (all
+  # zeros) because mbcf_cpp() still takes it; the imputation branch in
+  # bcf_clean_overpar.cpp is therefore never entered.
   #------------------------------------------------------------
-  yrr <- 1L * is.na(y)
-  n_ymiss <- sum(yrr)
-  if (n_ymiss > 0) {
-    pct_ymiss <- round(100 * n_ymiss / nrow(x), 1)
-    cat(n_ymiss, "missing values detected in outcome vector used for training (",
-        pct_ymiss, "% of training rows). Imputing via draws from fully conditional posterior.\n")
+  if (any(is.na(y))) {
+    stop("Missing values in y. mbcf() does not support missing outcomes: ",
+         sum(is.na(y)), " of ", length(y), " training outcomes are NA. ",
+         "Drop these rows (they can be supplied through x_est if you want ",
+         "predictions for them) before calling mbcf().")
   }
+  yrr <- integer(length(y))
+  n_ymiss <- 0L
   
   rr = 1*is.na(x)
   if(!is.null(x_est)){
@@ -300,6 +345,28 @@ mbcf <- function(y,
   if(na_seqreg==TRUE & is.null(na_reg_type)) warning("Default regression types used for all missing covariates")
   
   #------------------------------------------------------------
+  # mTreeSHAP argument checks
+  #------------------------------------------------------------
+  if(compute_shap){
+    if(!shap_mod & !shap_con) stop("compute_shap=TRUE but both shap_mod and shap_con are FALSE")
+    if(shap_thin < 1) stop("shap_thin must be a positive integer")
+    shap_thin <- as.integer(shap_thin)
+    n_shap <- ceiling((nsim*nthin)/shap_thin)
+    if(n_shap < 1) stop("shap_thin is larger than nsim*nthin; no SHAP draws would be computed")
+    if(shap_store_draws){
+      p_store <- (if(shap_mod) length(mod_cols) else 0) + (if(shap_con) ncol(x) else 0)
+      gb <- 8 * nrow(x) * p_store * n_shap / 2^30
+      if(gb > 1) warning("shap_store_draws=TRUE will allocate about ",
+                         round(gb,1), " GB of SHAP draws (", nrow(x), " rows x ",
+                         p_store, " columns x ", n_shap, " draws). Consider a larger ",
+                         "shap_thin, or shap_var=TRUE instead, which gives posterior ",
+                         "means and variances without storing draws.")
+    }
+  } else {
+    n_shap <- 0
+  }
+  
+  #------------------------------------------------------------
   # Global collinearity check for sequential regression imputation
   # Runs before any imputation; uses only observed data.
   # TODO: extend to per-variable sequential collinearity diagnostics
@@ -365,6 +432,10 @@ mbcf <- function(y,
   }
   
   na_seqreg_modtyp <-rep(0,ncol(x))
+  
+  # identity unless the missingness-ordering branch below overwrites it; having it
+  # always defined lets the vi_mod / SHAP un-permutation use one code path
+  perm_miss <- seq_len(ncol(x))
   
   if(na_seqreg | na_mia){
     
@@ -641,20 +712,8 @@ mbcf <- function(y,
     }
   }
   
-  #------------------------------------------------------------
-  # Initialize missing y: stochastic draw from lm(y ~ x_ord) on complete cases
-  # Done after x is fully initialized so x_ord has no NAs
-  #------------------------------------------------------------
+  # y has no missing values (enforced above), so no initialisation is needed
   y_init <- y
-  if (n_ymiss > 0) {
-    y_obs_rows  <- which(yrr == 0)
-    y_miss_rows <- which(yrr == 1)
-    ydf <- as.data.frame(x_ord)
-    ydf$y__ <- y
-    fit_y <- lm(y__ ~ ., data = ydf[y_obs_rows, ])
-    y_init[y_miss_rows] <- predict(fit_y, newdata = ydf[y_miss_rows, ]) +
-      rnorm(n_ymiss, 0, summary(fit_y)$sigma)
-  }
   
   #VBT: Uses their (sort of confusing) function to spit out a vector of potential split points to choose from
   cutpoint_list_c = lapply(1:ncol(x_ord), function(i) .cp_quantile(x_ord[,i],num=num_breaks))
@@ -761,7 +820,15 @@ mbcf <- function(y,
                     use_bscale = use_tauscale, 
                     b_half_normal = TRUE,
                     
-                    min_node
+                    min_node,
+                    
+                    compute_shap      = compute_shap,
+                    shap_mod          = shap_mod,
+                    shap_con          = shap_con,
+                    shap_thin         = shap_thin,
+                    shap_var          = shap_var,
+                    shap_store_draws  = shap_store_draws,
+                    shap_check        = shap_check
   )  
   if (bugtest){
     fitbcf
@@ -813,6 +880,89 @@ mbcf <- function(y,
     nonzero <- row_totals > 0
     vi_mod_prop[nonzero, ] <- vi_mod_orig[nonzero, ] / row_totals[nonzero]
     
+    #------------------------------------------------------------
+    # mTreeSHAP post-processing
+    #
+    # C++ returns SHAP on the standardised-y scale, with rows in the
+    # treatment-ordered row order and columns in the missingness-ordered
+    # covariate order. Undo both, then multiply by sdy to get the same units as
+    # tau_post / mu_post. The additive constant muy belongs to the prognostic
+    # baseline only; it does not affect any SHAP value.
+    #------------------------------------------------------------
+    shap_mod_out <- NULL
+    shap_con_out <- NULL
+    
+    if(compute_shap && !is.null(fitbcf$shap)){
+      
+      sh <- fitbcf$shap
+      K  <- sh$n_draws
+      row_order <- order(perm)
+      
+      .shap_pp <- function(acc, col_map, col_names, mask, base_offset = 0){
+        if(is.null(acc)) return(NULL)
+        if(K < 1) return(NULL)
+        take <- function(M) {
+          M <- M[row_order, col_map, drop = FALSE]
+          dimnames(M) <- list(NULL, col_names)
+          M
+        }
+        out <- list()
+        out$mean     <- sdy * take(acc$sum / K)
+        out$mean_abs <- sdy * take(acc$sum_abs / K)
+        
+        # Stratum fields of section 4.2 of the plan. These are DERIVED here
+        # rather than accumulated in C++: for a given cell (i,j) the
+        # missingness status r_ij is fixed across MCMC iterations, so every
+        # cell belongs entirely to one stratum and the mis matrix is either
+        # mean_abs[i,j] or exactly 0. Computing them in R gives the documented
+        # output with no extra accumulator in the sampler. The per-variable
+        # aggregates, which are what these are actually used for, are in
+        # shap_summary().
+        if(!is.null(mask)){
+          colnames(mask) <- col_names
+          out$mean_abs_mis <- out$mean_abs * mask
+          out$mean_abs_obs <- out$mean_abs * (!mask)
+        }
+        if(!is.null(acc$sum_sq)){
+          v <- acc$sum_sq/K - (acc$sum/K)^2
+          v[v < 0] <- 0                       # floating-point guard
+          if(K > 1) v <- v * K/(K-1)
+          out$var <- (sdy^2) * take(v)
+        }
+        out$baseline <- base_offset + sdy * as.numeric(acc$baseline)[seq_len(K)]
+        if(!is.null(acc$draws)){
+          D <- sdy * acc$draws[row_order, col_map, seq_len(K), drop = FALSE]
+          dimnames(D) <- list(NULL, col_names, NULL)
+          out$draws <- D
+        }
+        if(!is.null(acc$max_err)) out$max_err <- as.numeric(acc$max_err)[seq_len(K)]
+        out$n_draws <- K
+        out$thin    <- sh$thin
+        out$iters   <- as.integer(sh$iters)[seq_len(K)]
+        out
+      }
+      
+      var_names <- colnames(x)
+      if(is.null(var_names)) var_names <- paste0("x", seq_len(ncol(x)))
+      
+      if(shap_mod && !is.null(sh$mod)){
+        # C++ moderate-tree features are the mod columns of x_ord, in x_ord order;
+        # their original indices are perm_miss[which(wmv_ord)]
+        orig_idx <- perm_miss[which(wmv_ord)]
+        shap_mod_out <- .shap_pp(sh$mod,
+                                 col_map   = match(mod_cols, orig_idx),
+                                 col_names = var_names[mod_cols],
+                                 mask      = (rr[, mod_cols, drop = FALSE] == 1))
+      }
+      if(shap_con && !is.null(sh$con)){
+        shap_con_out <- .shap_pp(sh$con,
+                                 col_map     = order(perm_miss),
+                                 col_names   = var_names,
+                                 mask        = (rr == 1),
+                                 base_offset = muy)
+      }
+    }
+    
     list(yhat = yhat_post,
          mu_post = mu_post,
          tau_post = tau_post,
@@ -824,7 +974,11 @@ mbcf <- function(y,
          random_var_post = random_var_post,
          perm = perm,
          vi_mod = vi_mod_orig,       # raw coverage-weighted counts, original col order
-         vi_mod_prop = vi_mod_prop)  # row-normalised proportions
+         vi_mod_prop = vi_mod_prop,  # row-normalised proportions
+         shap_mod = shap_mod_out,    # SHAP for tau(x); NULL unless requested
+         shap_con = shap_con_out,    # SHAP for mu(x);  NULL unless requested
+         na_mask = if(compute_shap) (rr == 1) else NULL,
+         mod_cols = mod_cols)
   }
   
-}
+}
