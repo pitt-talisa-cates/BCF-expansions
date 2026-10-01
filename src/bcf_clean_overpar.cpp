@@ -20,6 +20,7 @@
 #include "funs.h"
 #include "bd.h"
 #include "shap.h"
+#include <ctime>
 
 using namespace Rcpp;
 
@@ -76,7 +77,6 @@ List  mbcf_cpp(NumericVector y_,
                double na_prob_pm_con,
                double na_prob_pm_mod,
                
-               NumericVector yrr_,            // missingness indicator for y: 1=missing, 0=observed
                bool na_mia = true,
                bool na_seqreg =false,
                bool check_node_missing = true,
@@ -96,7 +96,9 @@ List  mbcf_cpp(NumericVector y_,
                int  shap_thin=10,
                bool shap_var=false,
                bool shap_store_draws=false,
-               bool shap_check=false
+               bool shap_check=false,
+               bool shap_est=false,
+               bool vi_coverage=false
 )
 {
   // ---- mTreeSHAP controls (see shap.h) ---------------------------------------
@@ -109,6 +111,9 @@ List  mbcf_cpp(NumericVector y_,
   // shap_var          also accumulate the sum of squares
   // shap_store_draws  keep every computed SHAP draw (n x p x K)
   // shap_check        report the worst local-accuracy error per draw
+  // shap_est          also attribute the x_est rows, using TRAINING coverage
+  // vi_coverage       additionally accumulate vi_mod weighted by refreshed node
+  //                   coverage, for comparison against the n0-weighted version
   //
   // NB keep the argument list above free of comments. Rcpp::compileAttributes()
   // flattens the signature onto one line, so a comment spanning more than one
@@ -159,13 +164,10 @@ List  mbcf_cpp(NumericVector y_,
   double ybar = allys.sy/n; //sample mean
   double shat = sqrt((allys.sy2-n*ybar*ybar)/(n-1)); //sample standard deviation
   
-  // build index vector of missing y observations from yrr_
-  std::vector<size_t> y_miss_idx;
-  for(size_t i = 0; i < n; ++i) {
-    if(yrr_[i] == 1) y_miss_idx.push_back(i);
-  }
-  const bool have_ymiss = !y_miss_idx.empty();
-  
+  // Missing outcomes are not supported: mbcf() stops before reaching here if y
+  // has any NA. The fully-conditional y draw that used to live in this file has
+  // been removed rather than left dormant -- interval coverage for tau was very
+  // poor and the idea is not coming back.
   
   /*****************************************************************************/
   // Read, format x and rr for the training set */
@@ -307,6 +309,17 @@ List  mbcf_cpp(NumericVector y_,
           for (size_t j = 1; j < (p_con+1); ++j)
             if (std::count(vcol_mod.begin(), vcol_mod.end(), j))
               rrtp_mod_est.push_back(rr_est.memptr() + j*n_est + i);
+    
+    // xtp_con_est / rrtp_con_est: pointers for m(x) on the test set. These were
+    // declared but never filled, which is why the control trees had no test-set
+    // dinfo and mu(x) could not be evaluated at x_est at all. All p_con columns,
+    // in the same order as the training xtp_con.
+    for (size_t i = 0; i < n_est; ++i)
+      for (size_t j = 1; j < (p_con+1); ++j)
+        xtp_con_est.push_back(x_est.memptr() + j*n_est + i);
+    for (size_t i = 0; i < n_est; ++i)
+      for (size_t j = 1; j < (p_con+1); ++j)
+        rrtp_con_est.push_back(rr_est.memptr() + j*n_est + i);
   }
   
   /*****************************************************************************/
@@ -672,12 +685,25 @@ List  mbcf_cpp(NumericVector y_,
   di_mod_est.rr = nullptr;
   di_mod_est.y = 0;
   
+  dinfo di_con_est;           // initialize to "empty"
+  di_con_est.n = 0;
+  di_con_est.p = 0;
+  di_con_est.x = nullptr;
+  di_con_est.rr = nullptr;
+  di_con_est.y = 0;
+  
   if (have_est) {
     di_mod_est.n = n_est;
     di_mod_est.p = p_mod;
     di_mod_est.x = &(xtp_mod_est[0]);
     di_mod_est.rr = &(rrtp_mod_est[0]);
     di_mod_est.y = 0;
+    
+    di_con_est.n = n_est;
+    di_con_est.p = p_con;
+    di_con_est.x = &(xtp_con_est[0]);
+    di_con_est.rr = &(rrtp_con_est[0]);
+    di_con_est.y = 0;
   }
   
   //--------------------------------------------------
@@ -732,12 +758,21 @@ List  mbcf_cpp(NumericVector y_,
   NumericMatrix yhat_post(nd,n);
   NumericMatrix b_post(nd,n);
   NumericMatrix b_est_post(nd,n_est);
+  NumericMatrix m_est_post(nd,n_est);   // mu(x) at x_est; gives yhat on the test set
   arma::mat gamma_post(nd,gamma.n_elem);
   arma::mat random_var_post(nd,random_var.n_elem);
   
   // Coverage-weighted variable importance for tau (b(x)) trees
   // Rows = variables (p_mod), cols = na type (0=value/SeqReg, 1=MIA1, 2=MIA2, 3=pattern)
   arma::mat vi_mod(p_mod, 4, arma::fill::zeros);
+  // Companion to vi_mod, weighted by REFRESHED node coverage rather than by n0.
+  // vi_mod weights each internal node by getn0(), which for an internal node is
+  // whatever birth() wrote when that node was last a leaf, so it drifts as the
+  // imputed x moves (see the comment at tree.cpp line ~494). This accumulates
+  // the same counts weighted by coverage recomputed from the current x, so the
+  // two can be compared directly on real data. Off by default: it costs one
+  // update_coverage() pass per saved draw.
+  arma::mat vi_mod_cov(p_mod, 4, arma::fill::zeros);
   
   /*****************************************************************************/
   // mTreeSHAP accumulators
@@ -765,6 +800,23 @@ List  mbcf_cpp(NumericVector y_,
   arma::vec shap_base_mod, shap_base_con, shap_err_mod, shap_err_con;
   arma::cube shap_draws_mod, shap_draws_con;
   IntegerVector shap_iters(n_shap_max);
+  arma::uvec undef_mod, undef_con;
+  
+  // Out-of-sample attributions: the same accumulators over the x_est rows. Node
+  // coverage still comes from the TRAINING rows, so the background distribution,
+  // and therefore the baseline, is identical to the in-sample case. That is what
+  // makes in-sample and out-of-sample attributions comparable, and it is why the
+  // _est output shares the in-sample baseline vector rather than carrying its
+  // own. n_undef counts, per test row, the draws at which that row's path
+  // reached a node with no training coverage; see shap.h.
+  const bool do_shap_mod_est = do_shap_mod && shap_est && have_est;
+  const bool do_shap_con_est = do_shap_con && shap_est && have_est;
+  arma::mat shap_sum_mod_est, shap_sumabs_mod_est, shap_sumsq_mod_est, phi_mod_est;
+  arma::mat shap_sum_con_est, shap_sumabs_con_est, shap_sumsq_con_est, phi_con_est;
+  arma::vec shap_err_mod_est, shap_err_con_est;
+  arma::cube shap_draws_mod_est, shap_draws_con_est;
+  arma::uvec shap_undef_mod_est, shap_undef_con_est;
+  double shap_seconds = 0.0;
   
   if(do_shap_mod) {
     shap_sum_mod.zeros(n, p_mod);
@@ -784,11 +836,29 @@ List  mbcf_cpp(NumericVector y_,
     if(shap_store_draws) shap_draws_con.zeros(n, p_con, n_shap_max);
     if(shap_check) shap_err_con.zeros(n_shap_max);
   }
+  if(do_shap_mod_est) {
+    shap_sum_mod_est.zeros(n_est, p_mod);
+    shap_sumabs_mod_est.zeros(n_est, p_mod);
+    shap_undef_mod_est.zeros(n_est);
+    if(shap_var) shap_sumsq_mod_est.zeros(n_est, p_mod);
+    if(shap_store_draws) shap_draws_mod_est.zeros(n_est, p_mod, n_shap_max);
+    if(shap_check) shap_err_mod_est.zeros(n_shap_max);
+  }
+  if(do_shap_con_est) {
+    shap_sum_con_est.zeros(n_est, p_con);
+    shap_sumabs_con_est.zeros(n_est, p_con);
+    shap_undef_con_est.zeros(n_est);
+    if(shap_var) shap_sumsq_con_est.zeros(n_est, p_con);
+    if(shap_store_draws) shap_draws_con_est.zeros(n_est, p_con, n_shap_max);
+    if(shap_check) shap_err_con_est.zeros(n_shap_max);
+  }
   if(compute_shap) {
     Rcout << "mTreeSHAP: " << n_shap_max << " draws (every " << shap_thin
           << " post-burn-in iterations)";
     if(do_shap_mod) Rcout << "; tau";
     if(do_shap_con) Rcout << "; mu";
+    if(do_shap_mod_est || do_shap_con_est)
+      Rcout << "; x_est (" << n_est << " rows, training coverage)";
     Rcout << std::endl;
   }
   //std::vector<double> xaccept;
@@ -892,17 +962,6 @@ List  mbcf_cpp(NumericVector y_,
     vec_s ivec;
     
     double ysig = -1.0/(2*sigma*sigma);
-    
-    ////////////
-    // draw missing y from fully conditional posterior: y_i | rest ~ N(allfit[i], sigma^2)
-    // done first so all subsequent updates use the most recent y draws
-    ////////////
-    if(have_ymiss) {
-      for(size_t ii = 0; ii < y_miss_idx.size(); ++ii) {
-        size_t i = y_miss_idx[ii];
-        y[i] = allfit[i] + sigma * gen.normal(0.0, 1.0);
-      }
-    }
     
     if (na_seqreg){
       
@@ -1679,34 +1738,69 @@ List  mbcf_cpp(NumericVector y_,
     if( compute_shap && (mc>=burn) && (((mc-burn) % shap_thin)==0) && (shap_ctr<n_shap_max) )  {
       
       shap_iters(shap_ctr) = mc;
+      const std::clock_t shap_t0 = std::clock();
       
       if(do_shap_mod) {
         // b(x) enters y as bscale*b(x); tau(x) = (bscale1-bscale0)*b(x), which is
         // exactly the scaling used for b_post below
         const double scale_mod = bscale1 - bscale0;
-        const double base = mtreeshap_forest(t_mod, xi_mod, di_mod, scale_mod, phi_mod);
+        const double base = mtreeshap_forest(t_mod, xi_mod, di_mod, di_mod,
+                                             scale_mod, phi_mod, undef_mod);
         shap_base_mod(shap_ctr) = base;
         shap_sum_mod    += phi_mod;
         shap_sumabs_mod += arma::abs(phi_mod);
         if(shap_var) shap_sumsq_mod += phi_mod % phi_mod;
         if(shap_store_draws) shap_draws_mod.slice(shap_ctr) = phi_mod;
         if(shap_check) shap_err_mod(shap_ctr) =
-          mtreeshap_max_efficiency_error(t_mod, xi_mod, di_mod, scale_mod, phi_mod, base);
+          mtreeshap_max_efficiency_error(t_mod, xi_mod, di_mod, scale_mod,
+                                         phi_mod, base, undef_mod);
+        
+        // x_est rows, TRAINING coverage, same baseline
+        if(do_shap_mod_est) {
+          arma::uvec ud;
+          const double base_e = mtreeshap_forest(t_mod, xi_mod, di_mod, di_mod_est,
+                                                 scale_mod, phi_mod_est, ud);
+          shap_sum_mod_est    += phi_mod_est;
+          shap_sumabs_mod_est += arma::abs(phi_mod_est);
+          shap_undef_mod_est  += ud;
+          if(shap_var) shap_sumsq_mod_est += phi_mod_est % phi_mod_est;
+          if(shap_store_draws) shap_draws_mod_est.slice(shap_ctr) = phi_mod_est;
+          if(shap_check) shap_err_mod_est(shap_ctr) =
+            mtreeshap_max_efficiency_error(t_mod, xi_mod, di_mod_est, scale_mod,
+                                           phi_mod_est, base_e, ud);
+        }
       }
       
       if(do_shap_con) {
         // allfit_con = mscale*m(x), matching m_post below
         const double scale_con = mscale;
-        const double base = mtreeshap_forest(t_con, xi_con, di_con, scale_con, phi_con);
+        const double base = mtreeshap_forest(t_con, xi_con, di_con, di_con,
+                                             scale_con, phi_con, undef_con);
         shap_base_con(shap_ctr) = base;
         shap_sum_con    += phi_con;
         shap_sumabs_con += arma::abs(phi_con);
         if(shap_var) shap_sumsq_con += phi_con % phi_con;
         if(shap_store_draws) shap_draws_con.slice(shap_ctr) = phi_con;
         if(shap_check) shap_err_con(shap_ctr) =
-          mtreeshap_max_efficiency_error(t_con, xi_con, di_con, scale_con, phi_con, base);
+          mtreeshap_max_efficiency_error(t_con, xi_con, di_con, scale_con,
+                                         phi_con, base, undef_con);
+        
+        if(do_shap_con_est) {
+          arma::uvec ud;
+          const double base_e = mtreeshap_forest(t_con, xi_con, di_con, di_con_est,
+                                                 scale_con, phi_con_est, ud);
+          shap_sum_con_est    += phi_con_est;
+          shap_sumabs_con_est += arma::abs(phi_con_est);
+          shap_undef_con_est  += ud;
+          if(shap_var) shap_sumsq_con_est += phi_con_est % phi_con_est;
+          if(shap_store_draws) shap_draws_con_est.slice(shap_ctr) = phi_con_est;
+          if(shap_check) shap_err_con_est(shap_ctr) =
+            mtreeshap_max_efficiency_error(t_con, xi_con, di_con_est, scale_con,
+                                           phi_con_est, base_e, ud);
+        }
       }
       
+      shap_seconds += (double)(std::clock() - shap_t0) / (double)CLOCKS_PER_SEC;
       shap_ctr += 1;
     }
     
@@ -1737,6 +1831,7 @@ List  mbcf_cpp(NumericVector y_,
       if (have_est) {
         for (size_t i = 0; i < n_est; ++i) {
           b_est_post(save_ctr, i) = (bscale1 - bscale0) * fit_i(i, t_mod, xi_mod, di_mod_est);
+          m_est_post(save_ctr, i) = mscale * fit_i(i, t_con, xi_con, di_con_est);
         }
       }
       if(bugtest){
@@ -1761,12 +1856,33 @@ List  mbcf_cpp(NumericVector y_,
         }
       }
       
+      // Same counts, weighted by refreshed coverage instead of n0
+      if(vi_coverage) {
+        for(int k=0; k<ntree_mod; k++) {
+          update_coverage(t_mod[k], xi_mod, di_mod);
+          tree::npv cov_nodes;
+          t_mod[k].getnodes(cov_nodes);
+          for(size_t ni=0; ni<cov_nodes.size(); ++ni) {
+            if(cov_nodes[ni]->getl() != 0) {
+              size_t vv = cov_nodes[ni]->getv();
+              size_t na_type = cov_nodes[ni]->getna();
+              if(na_type > 3) na_type = 0;
+              vi_mod_cov(vv, na_type) += cov_nodes[ni]->getcoverage();
+            }
+          }
+        }
+      }
+      
       save_ctr += 1;
     }
   }
   
   int time2 = time(&tp);
   Rcout << "time for loop: " << time2 - time1 << endl;
+  if(compute_shap)
+    Rcout << "  of which mTreeSHAP: " << shap_seconds << " sec CPU over "
+          << shap_ctr << " draws ("
+          << (shap_ctr > 0 ? shap_seconds/shap_ctr : 0.0) << " sec/draw)" << endl;
   
   t_mod.clear(); 
   t_con.clear();
@@ -1805,14 +1921,39 @@ List  mbcf_cpp(NumericVector y_,
       _["draws"]    = shap_store_draws ? wrap(shap_draws_con)  : R_NilValue,
       _["max_err"]  = shap_check       ? wrap(shap_err_con)    : R_NilValue);
   }
+  SEXP shap_mod_est_out = R_NilValue;
+  SEXP shap_con_est_out = R_NilValue;
+  if(do_shap_mod_est) {
+    shap_mod_est_out = List::create(
+      _["sum"]      = shap_sum_mod_est,
+      _["sum_abs"]  = shap_sumabs_mod_est,
+      _["sum_sq"]   = shap_var         ? wrap(shap_sumsq_mod_est) : R_NilValue,
+      _["baseline"] = shap_base_mod,            // training coverage: same baseline
+      _["draws"]    = shap_store_draws ? wrap(shap_draws_mod_est) : R_NilValue,
+      _["max_err"]  = shap_check       ? wrap(shap_err_mod_est)   : R_NilValue,
+      _["n_undef"]  = shap_undef_mod_est);
+  }
+  if(do_shap_con_est) {
+    shap_con_est_out = List::create(
+      _["sum"]      = shap_sum_con_est,
+      _["sum_abs"]  = shap_sumabs_con_est,
+      _["sum_sq"]   = shap_var         ? wrap(shap_sumsq_con_est) : R_NilValue,
+      _["baseline"] = shap_base_con,
+      _["draws"]    = shap_store_draws ? wrap(shap_draws_con_est) : R_NilValue,
+      _["max_err"]  = shap_check       ? wrap(shap_err_con_est)   : R_NilValue,
+      _["n_undef"]  = shap_undef_con_est);
+  }
   SEXP shap_out = R_NilValue;
   if(compute_shap) {
     shap_out = List::create(
       _["n_draws"] = shap_ctr,
       _["thin"]    = shap_thin,
       _["iters"]   = shap_iters,
+      _["seconds"] = shap_seconds,
       _["mod"]     = shap_mod_out,
-      _["con"]     = shap_con_out);
+      _["con"]     = shap_con_out,
+      _["mod_est"] = shap_mod_est_out,
+      _["con_est"] = shap_con_est_out);
   }
   
   if(bugtest){
@@ -1831,6 +1972,8 @@ List  mbcf_cpp(NumericVector y_,
                         _["xm1_post"] = xm1_post,
                         _["xm1_post_est"] = xm1_est_post,
                         _["vi_mod"] = vi_mod,
+                        _["vi_mod_cov"] = vi_coverage ? wrap(vi_mod_cov) : R_NilValue,
+                        _["m_est_post"] = m_est_post,
                         _["shap"] = shap_out));
   }
   
@@ -1845,6 +1988,8 @@ List  mbcf_cpp(NumericVector y_,
                       _["gamma"] = gamma_post, 
                       _["random_var_post"] = random_var_post,
                       _["vi_mod"] = vi_mod,
+                      _["vi_mod_cov"] = vi_coverage ? wrap(vi_mod_cov) : R_NilValue,
+                      _["m_est_post"] = m_est_post,
                       _["shap"] = shap_out
   ));
 }

@@ -83,54 +83,70 @@ double tree_baseline(tree& t)
 
 double mtreeshap_forest(std::vector<tree>& t,
                         xinfo& xi,
-                        dinfo& di,
+                        dinfo& di_cov,
+                        dinfo& di_eval,
                         double scale,
-                        arma::mat& phi)
+                        arma::mat& phi,
+                        arma::uvec& undef)
 {
   double baseline = 0.0;
 
+  undef.zeros(di_eval.n);
+
   // row-major scratch: arma matrices are column-major, so we cannot hand the
   // recursion a contiguous pointer into a row of phi
-  std::vector<double> buf(di.n * di.p, 0.0);
+  std::vector<double> buf(di_eval.n * di_eval.p, 0.0);
 
   for(size_t k=0; k<t.size(); ++k) {
 
-    update_coverage(t[k], xi, di);
+    // coverage ALWAYS comes from di_cov, i.e. the training rows
+    update_coverage(t[k], xi, di_cov);
     baseline += tree_baseline(t[k]);
 
     if(t[k].getl() == 0) continue;             // stump: all of it is baseline
 
-    for(size_t i=0; i<di.n; ++i) {
+    for(size_t i=0; i<di_eval.n; ++i) {
       MbcfRouter tr;
-      tr.xx = di.x  + i*di.p;
-      tr.rr = di.rr + i*di.p;
+      tr.xx = di_eval.x  + i*di_eval.p;
+      tr.rr = di_eval.rr + i*di_eval.p;
       tr.xi = &xi;
+
+      // flag rows whose own path leaves the support of the coverage rows
+      for(tree::tree_p nd = t[k].getptr(); ; ) {
+        if(nd->getcoverage() <= 0.0) { undef(i) = 1; break; }
+        if(nd->getl() == 0) break;
+        nd = tr.hot(nd);
+      }
+
       std::vector<mshap::PathElement> m;
       m.reserve(16);
-      mshap::recurse<MbcfRouter>(t[k].getptr(), m, 1.0, 1.0, -1, tr, &buf[i*di.p]);
+      mshap::recurse<MbcfRouter>(t[k].getptr(), m, 1.0, 1.0, -1, tr,
+                                 &buf[i*di_eval.p]);
     }
   }
 
-  phi.set_size(di.n, di.p);
-  for(size_t i=0; i<di.n; ++i)
-    for(size_t j=0; j<di.p; ++j)
-      phi(i,j) = scale * buf[i*di.p + j];
+  phi.set_size(di_eval.n, di_eval.p);
+  for(size_t i=0; i<di_eval.n; ++i)
+    for(size_t j=0; j<di_eval.p; ++j)
+      phi(i,j) = scale * buf[i*di_eval.p + j];
 
   return scale * baseline;
 }
 
 double mtreeshap_max_efficiency_error(std::vector<tree>& t,
                                       xinfo& xi,
-                                      dinfo& di,
+                                      dinfo& di_eval,
                                       double scale,
                                       const arma::mat& phi,
-                                      double baseline)
+                                      double baseline,
+                                      const arma::uvec& undef)
 {
   double worst = 0.0;
-  for(size_t i=0; i<di.n; ++i) {
-    const double fx = scale * fit_i(i, t, xi, di);
+  for(size_t i=0; i<di_eval.n; ++i) {
+    if(undef.n_elem == di_eval.n && undef(i) == 1) continue;
+    const double fx = scale * fit_i(i, t, xi, di_eval);
     double s = baseline;
-    for(size_t j=0; j<di.p; ++j) s += phi(i,j);
+    for(size_t j=0; j<di_eval.p; ++j) s += phi(i,j);
     const double err = std::fabs(s - fx);
     if(err > worst) worst = err;
   }

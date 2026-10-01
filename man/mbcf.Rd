@@ -10,6 +10,7 @@ mbcf(
   x,
   mod_cols = 1:ncol(x),
   x_est = NULL,
+  z_est = NULL,
   nburn,
   nsim,
   nthin = 1,
@@ -45,6 +46,8 @@ mbcf(
   shap_var = FALSE,
   shap_store_draws = FALSE,
   shap_check = FALSE,
+  shap_est = FALSE,
+  vi_coverage = FALSE,
   bugtest = FALSE
 )
 }
@@ -52,6 +55,11 @@ mbcf(
 \item{y}{Response variable}
 
 \item{z}{Treatment variable}
+
+\item{z_est}{Optional treatment indicator for the \code{x_est} rows. When
+supplied, \code{yhat_post_est} is the prediction under each test row's own
+treatment value; otherwise it is the control-arm prediction
+\code{mu_post_est}.}
 
 \item{nburn}{Number of burn-in MCMC iterations}
 
@@ -119,6 +127,22 @@ as a warning when it exceeds 1 GB.}
 \item{shap_check}{At every SHAP draw, record the worst local-accuracy error
 max_i |sum_j phi_ij + baseline - f(x_i)|. Should be ~1e-10; useful as a
 regression test after changes to the tree code.}
+
+\item{shap_est}{Also attribute the \code{x_est} rows, using node coverage
+from the TRAINING rows. The background distribution, and therefore the
+baseline, is identical to the in-sample case, which is what makes in-sample
+and out-of-sample attributions comparable. Requires \code{x_est}. Rows
+whose path reaches a node with no training coverage are counted in
+\code{n_undef} and warned about: for those rows the path-dependent
+conditional expectation does not exist, so the attributions do not sum to
+the prediction.}
+
+\item{vi_coverage}{Additionally accumulate \code{vi_mod} weighted by node
+coverage recomputed from the current imputed x at every save, returned as
+\code{vi_mod_cov}. \code{vi_mod} itself weights internal nodes by
+\code{getn0()}, which is only correct as of the last birth or death at that
+node, so comparing the two shows how much that staleness moves the reported
+variable importance. Costs one coverage pass per saved draw.}
 
 \item{x_control}{Design matrix for the "prognostic" function mu(x)}
 

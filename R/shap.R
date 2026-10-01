@@ -28,22 +28,32 @@
   nm
 }
 
-.shap_get <- function(fit, which = c("mod", "con")) {
-  which <- match.arg(which)
-  out <- if (which == "mod") fit$shap_mod else fit$shap_con
+.shap_which <- c("mod", "con", "mod_est", "con_est")
+
+.shap_label <- function(which) if (grepl("^mod", which)) "tau" else "mu"
+
+.shap_get <- function(fit, which = .shap_which) {
+  which <- match.arg(which, .shap_which)
+  out <- switch(which,
+                mod     = fit$shap_mod,
+                con     = fit$shap_con,
+                mod_est = fit$shap_mod_est,
+                con_est = fit$shap_con_est)
   if (is.null(out)) {
-    stop("No SHAP values for the ", if (which == "mod") "tau" else "mu",
-         " function in this fit. Refit with compute_shap=TRUE and ",
-         if (which == "mod") "shap_mod=TRUE" else "shap_con=TRUE", ".")
+    stop("No ", which, " SHAP values in this fit. Refit with compute_shap=TRUE, ",
+         if (grepl("^mod", which)) "shap_mod=TRUE" else "shap_con=TRUE",
+         if (grepl("_est$", which)) ", shap_est=TRUE, and x_est supplied" else "",
+         ".")
   }
   out
 }
 
 # missingness mask restricted to the columns the requested SHAP matrix uses
-.shap_mask <- function(fit, which = c("mod", "con"), shp) {
-  which <- match.arg(which)
-  if (is.null(fit$na_mask)) return(NULL)
-  m <- if (which == "mod") fit$na_mask[, fit$mod_cols, drop = FALSE] else fit$na_mask
+.shap_mask <- function(fit, which = .shap_which, shp) {
+  which <- match.arg(which, .shap_which)
+  msk <- if (grepl("_est$", which)) fit$na_mask_est else fit$na_mask
+  if (is.null(msk)) return(NULL)
+  m <- if (grepl("^mod", which)) msk[, fit$mod_cols, drop = FALSE] else msk
   colnames(m) <- colnames(shp$mean_abs)
   m
 }
@@ -55,7 +65,8 @@
 #'   carried by the SHAP matrices. Length must match the number of covariates
 #'   for the requested function (\code{length(mod_cols)} for "mod",
 #'   \code{ncol(x)} for "con").
-#' @param which "mod" for tau(x), "con" for mu(x)
+#' @param which "mod" or "con" for tau(x) or mu(x) on the training rows;
+#'   "mod_est" or "con_est" for the same on the x_est rows
 #' @return A data frame, one row per covariate, sorted by decreasing importance:
 #'   \item{variable}{covariate name}
 #'   \item{mean_abs}{mean over observations of the posterior mean |SHAP|}
@@ -66,8 +77,8 @@
 #'     where the covariate is observed / missing}
 #'   \item{n_mis}{number of rows where the covariate is missing}
 #' @export
-shap_summary <- function(fit, var_names = NULL, which = c("mod", "con")) {
-  which <- match.arg(which)
+shap_summary <- function(fit, var_names = NULL, which = .shap_which) {
+  which <- match.arg(which, .shap_which)
   shp <- .shap_get(fit, which)
   A   <- shp$mean_abs
   S   <- shp$mean
@@ -111,13 +122,14 @@ shap_summary <- function(fit, var_names = NULL, which = c("mod", "con")) {
 #' @param var_names Optional covariate labels
 #' @param x Covariate matrix used to colour the points, i.e. the same \code{x}
 #'   passed to \code{mbcf()}. Optional; without it all points are grey.
-#' @param which "mod" for tau(x), "con" for mu(x)
+#' @param which "mod" or "con" for tau(x) or mu(x) on the training rows;
+#'   "mod_est" or "con_est" for the same on the x_est rows
 #' @param max_vars Show at most this many covariates, by decreasing importance
 #' @export
 plot_shap_beeswarm <- function(fit, var_names = NULL, x = NULL,
-                               which = c("mod", "con"),
+                               which = .shap_which,
                                max_vars = 20, cex = 0.4) {
-  which <- match.arg(which)
+  which <- match.arg(which, .shap_which)
   shp <- .shap_get(fit, which)
   S   <- shp$mean
   colnames(S) <- .shap_names(S, var_names)
@@ -130,14 +142,17 @@ plot_shap_beeswarm <- function(fit, var_names = NULL, x = NULL,
 
   xc <- NULL
   if (!is.null(x)) {
-    cols_used <- if (which == "mod") fit$mod_cols else seq_len(ncol(x))
+    if (nrow(x) != nrow(S))
+      stop("x has ", nrow(x), " rows but these SHAP values have ", nrow(S),
+           " rows; for this `which` pass the matrix those rows came from")
+    cols_used <- if (grepl("^mod", which)) fit$mod_cols else seq_len(ncol(x))
     xc <- x[, cols_used[keep], drop = FALSE]
   }
 
   p <- ncol(S)
   op <- par(mar = c(4.5, 8, 2, 1)); on.exit(par(op))
   plot(range(S, na.rm = TRUE), c(0.5, p + 0.5), type = "n", yaxt = "n",
-       xlab = paste0("posterior mean SHAP (", if (which == "mod") "tau" else "mu", ")"),
+       xlab = paste0("posterior mean SHAP (", .shap_label(which), ")"),
        ylab = "", main = "mTreeSHAP")
   axis(2, at = seq_len(p), labels = colnames(S), las = 1)
   abline(v = 0, col = "grey70")
@@ -162,12 +177,13 @@ plot_shap_beeswarm <- function(fit, var_names = NULL, x = NULL,
 #'
 #' @param fit Object returned by \code{mbcf()}
 #' @param var_names Optional covariate labels
-#' @param which "mod" for tau(x), "con" for mu(x)
+#' @param which "mod" or "con" for tau(x) or mu(x) on the training rows;
+#'   "mod_est" or "con_est" for the same on the x_est rows
 #' @param max_vars Show at most this many covariates, by decreasing importance
 #' @export
-plot_shap_importance <- function(fit, var_names = NULL, which = c("mod", "con"),
+plot_shap_importance <- function(fit, var_names = NULL, which = .shap_which,
                                  max_vars = 20) {
-  which <- match.arg(which)
+  which <- match.arg(which, .shap_which)
   tab <- shap_summary(fit, var_names = var_names, which = which)
   tab <- tab[seq_len(min(max_vars, nrow(tab))), ]
   tab <- tab[rev(seq_len(nrow(tab))), ]
@@ -181,7 +197,7 @@ plot_shap_importance <- function(fit, var_names = NULL, which = c("mod", "con"),
           col = c("grey35", "grey75"), border = NA,
           xlab = "posterior mean |SHAP|",
           main = paste0("SHAP importance by missingness (",
-                        if (which == "mod") "tau" else "mu", ")"))
+                        .shap_label(which), ")"))
   legend("bottomright", legend = c("observed", "missing"),
          fill = c("grey35", "grey75"), border = NA, bty = "n")
   invisible(tab)
@@ -196,12 +212,13 @@ plot_shap_importance <- function(fit, var_names = NULL, which = c("mod", "con"),
 #' @param fit Object returned by \code{mbcf()}
 #' @param i Row index (in the original, unpermuted row order)
 #' @param var_names Optional covariate labels
-#' @param which "mod" for tau(x), "con" for mu(x)
+#' @param which "mod" or "con" for tau(x) or mu(x) on the training rows;
+#'   "mod_est" or "con_est" for the same on the x_est rows
 #' @param max_vars Show at most this many covariates, by decreasing |SHAP|
 #' @export
-plot_shap_waterfall <- function(fit, i, var_names = NULL, which = c("mod", "con"),
+plot_shap_waterfall <- function(fit, i, var_names = NULL, which = .shap_which,
                                 max_vars = 12) {
-  which <- match.arg(which)
+  which <- match.arg(which, .shap_which)
   shp <- .shap_get(fit, which)
   colnames(shp$mean) <- .shap_names(shp$mean, var_names)
   msk <- .shap_mask(fit, which, shp)
@@ -221,7 +238,7 @@ plot_shap_waterfall <- function(fit, i, var_names = NULL, which = c("mod", "con"
           col = ifelse(phi > 0, "grey35", "grey65"),
           xlab = "posterior mean SHAP contribution",
           main = sprintf("observation %d:  baseline %.3f  ->  %s %.3f",
-                         i, base, if (which == "mod") "tau" else "mu",
+                         i, base, .shap_label(which),
                          base + sum(shp$mean[i, ])))
   abline(v = 0, col = "grey70")
   invisible(phi)

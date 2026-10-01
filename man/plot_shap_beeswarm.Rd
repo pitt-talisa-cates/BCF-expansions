@@ -8,7 +8,7 @@ plot_shap_beeswarm(
   fit,
   var_names = NULL,
   x = NULL,
-  which = c("mod", "con"),
+  which = .shap_which,
   max_vars = 20,
   cex = 0.4
 )
@@ -21,7 +21,8 @@ plot_shap_beeswarm(
 \item{x}{Covariate matrix used to colour the points, i.e. the same \code{x}
 passed to \code{mbcf()}. Optional; without it all points are grey.}
 
-\item{which}{"mod" for tau(x), "con" for mu(x)}
+\item{which}{"mod" or "con" for tau(x) or mu(x) on the training rows;
+"mod_est" or "con_est" for the same on the x_est rows}
 
 \item{max_vars}{Show at most this many covariates, by decreasing importance}
 }

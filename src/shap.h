@@ -57,27 +57,51 @@
 void update_coverage(tree& x, xinfo& xi, dinfo& di);
 
 //--------------------------------------------------
-// SHAP values for one forest, for all di.n rows.
-//   phi   : di.n x di.p, OVERWRITTEN (not accumulated) by this call
-//   scale : multiplies every phi and the baseline (see note 4 above)
-//   returns the baseline, i.e. scale * sum_over_trees(cover-weighted mean leaf)
+// SHAP values for one forest.
+//
+//   di_cov  : the rows that DEFINE node coverage, i.e. the background
+//             distribution the attributions are relative to. Always the
+//             training set.
+//   di_eval : the rows being attributed. Pass the same dinfo as di_cov for
+//             in-sample SHAP; pass a test-set dinfo for out-of-sample SHAP with
+//             training-set coverage.
+//   phi     : di_eval.n x di_eval.p, OVERWRITTEN (not accumulated) by this call
+//   scale   : multiplies every phi and the baseline (see note 4 above)
+//   undef   : length di_eval.n, set to 1 for rows whose attribution is not well
+//             defined, i.e. rows whose own root-to-leaf path passes through a
+//             node with zero training coverage. Impossible when
+//             di_eval == di_cov, since every training row contributes coverage
+//             to its own path. Possible for test rows: a leaf can hold no
+//             training rows at the current imputation draw, and the
+//             path-dependent conditional expectation E[f | x_S] is then
+//             undefined there. For those rows phi is still returned, but it
+//             omits the unreachable subtree, so local accuracy fails.
+//
+//   returns the baseline, i.e. scale * sum over trees of the coverage-weighted
+//   mean leaf value. Depends only on di_cov, so it is the same number for
+//   in-sample and out-of-sample attributions, which is what makes them
+//   comparable.
+//
 // update_coverage() is called internally for every tree, so the caller does not
 // need to.
 double mtreeshap_forest(std::vector<tree>& t,
                         xinfo& xi,
-                        dinfo& di,
+                        dinfo& di_cov,
+                        dinfo& di_eval,
                         double scale,
-                        arma::mat& phi);
+                        arma::mat& phi,
+                        arma::uvec& undef);
 
 //--------------------------------------------------
-// Largest |sum_j phi_ij + baseline - f(x_i)| over rows; f is recomputed from the
-// forest with fit_i(). This is the local-accuracy (efficiency) check and should
-// be ~1e-10. Cheap enough to run at every SHAP draw under bugtest.
+// Largest |sum_j phi_ij + baseline - f(x_i)| over rows, skipping rows flagged in
+// undef. f is recomputed from the forest with fit_i(). This is the
+// local-accuracy (efficiency) check and should be ~1e-10.
 double mtreeshap_max_efficiency_error(std::vector<tree>& t,
                                       xinfo& xi,
-                                      dinfo& di,
+                                      dinfo& di_eval,
                                       double scale,
                                       const arma::mat& phi,
-                                      double baseline);
+                                      double baseline,
+                                      const arma::uvec& undef);
 
 #endif

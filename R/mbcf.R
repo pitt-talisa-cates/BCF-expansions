@@ -89,6 +89,24 @@
 #' or "both" are HIGHLY recommended with observational data.
 #' @param use_muscale Use a half-Cauchy hyperprior on the scale of mu.
 #' @param use_tauscale Use a half-Normal prior on the scale of tau.
+#' @param z_est Optional treatment indicator for the \code{x_est} rows. When
+#'   supplied, \code{yhat_post_est} is the prediction under each test row's own
+#'   treatment value; otherwise it is the control-arm prediction
+#'   \code{mu_post_est}.
+#' @param shap_est Also attribute the \code{x_est} rows, using node coverage
+#'   from the TRAINING rows. The background distribution, and therefore the
+#'   baseline, is identical to the in-sample case, which is what makes in-sample
+#'   and out-of-sample attributions comparable. Requires \code{x_est}. Rows
+#'   whose path reaches a node with no training coverage are counted in
+#'   \code{n_undef} and warned about: for those rows the path-dependent
+#'   conditional expectation does not exist, so the attributions do not sum to
+#'   the prediction.
+#' @param vi_coverage Additionally accumulate \code{vi_mod} weighted by node
+#'   coverage recomputed from the current imputed x at every save, returned as
+#'   \code{vi_mod_cov}. \code{vi_mod} itself weights internal nodes by
+#'   \code{getn0()}, which is only correct as of the last birth or death at that
+#'   node, so comparing the two shows how much that staleness moves the reported
+#'   variable importance. Costs one coverage pass per saved draw.
 #' @param compute_shap Master switch for mTreeSHAP. Default FALSE, since it adds
 #'   runtime for users who do not need attributions.
 #' @param shap_mod Compute SHAP for the treatment effect function tau(x). Default TRUE.
@@ -213,6 +231,7 @@ mbcf <- function(y,
                  x, 
                  mod_cols = 1:ncol(x), 
                  x_est=NULL,
+                 z_est=NULL,
                  
                  nburn, 
                  nsim, 
@@ -256,18 +275,23 @@ mbcf <- function(y,
                  shap_var=FALSE,
                  shap_store_draws=FALSE,
                  shap_check=FALSE,
+                 shap_est=FALSE,
+                 vi_coverage=FALSE,
                  
                  bugtest=FALSE) {
   #browser()
   if (!is.matrix(x)) stop("x must be a matrix")
   if (!is.null(x_est) && !is.matrix(x_est)) stop("x_est must be a matrix when provided")
+  if (!is.null(z_est)) {
+    if (is.null(x_est)) stop("z_est supplied without x_est")
+    if (length(z_est) != nrow(x_est)) stop("z_est must have one entry per row of x_est")
+    if (any(is.na(z_est))) stop("z_est must not contain NA")
+  }
   
   #------------------------------------------------------------
   # Missing outcomes are not supported. Drawing y from its fully conditional
   # posterior was tried and gave very poor interval coverage for tau, so the
-  # feature was dropped rather than left available as a trap. yrr is kept (all
-  # zeros) because mbcf_cpp() still takes it; the imputation branch in
-  # bcf_clean_overpar.cpp is therefore never entered.
+  # draw has been removed from the C++ as well rather than left dormant.
   #------------------------------------------------------------
   if (any(is.na(y))) {
     stop("Missing values in y. mbcf() does not support missing outcomes: ",
@@ -275,8 +299,6 @@ mbcf <- function(y,
          "Drop these rows (they can be supplied through x_est if you want ",
          "predictions for them) before calling mbcf().")
   }
-  yrr <- integer(length(y))
-  n_ymiss <- 0L
   
   rr = 1*is.na(x)
   if(!is.null(x_est)){
@@ -314,9 +336,15 @@ mbcf <- function(y,
     )
   }
   
-  if (!is.null(x_est) && !.ident(ncol(x[, mod_cols, drop=FALSE]), ncol(x_est))) {
-    stop("Data size mismatch. ncol(x[,mod_cols]): ",ncol(x[,mod_cols]),"\n",
-         "ncol(x_est): ",ncol(x_est),"\n")
+  # x_est must carry ALL of x's columns, not just the moderators: the control
+  # trees split on every column, and mbcf_cpp() recovers the number of test rows
+  # as length(x_est_)/p_con. The old check compared against length(mod_cols),
+  # which coincides with ncol(x) only when every column is a moderator.
+  if (!is.null(x_est) && !.ident(ncol(x), ncol(x_est))) {
+    stop("Data size mismatch. x_est must have one column per column of x, ",
+         "including non-moderators.\n",
+         "ncol(x): ", ncol(x), "\n",
+         "ncol(x_est): ", ncol(x_est), "\n")
   }
   
   # VBT: Assorted checks
@@ -362,8 +390,11 @@ mbcf <- function(y,
                          "shap_thin, or shap_var=TRUE instead, which gives posterior ",
                          "means and variances without storing draws.")
     }
+    if(shap_est && is.null(x_est))
+      stop("shap_est=TRUE requires x_est")
   } else {
     n_shap <- 0
+    if(shap_est) warning("shap_est=TRUE has no effect unless compute_shap=TRUE")
   }
   
   #------------------------------------------------------------
@@ -809,7 +840,6 @@ mbcf <- function(y,
                     na_seqreg_modtyp,
                     na_prob_pm_con,
                     na_prob_pm_mod,
-                    yrr[perm],        # missingness indicator for y, permuted to match treatment ordering
                     na_mia,
                     na_seqreg,
                     check_node_missing,
@@ -828,7 +858,9 @@ mbcf <- function(y,
                     shap_thin         = shap_thin,
                     shap_var          = shap_var,
                     shap_store_draws  = shap_store_draws,
-                    shap_check        = shap_check
+                    shap_check        = shap_check,
+                    shap_est          = shap_est,
+                    vi_coverage       = vi_coverage
   )  
   if (bugtest){
     fitbcf
@@ -838,8 +870,18 @@ mbcf <- function(y,
     tau_post = sdy*fitbcf$b_post[,order(perm)]
     if(!is.null(x_est)){
       tau_post_est <- sdy*fitbcf$b_est_post
+      # mu(x) at x_est is now available, so the test set gets a yhat as well.
+      # yhat_post_est is the prediction under each row's OWN treatment value
+      # when z_est is supplied, and under control otherwise.
+      mu_post_est  <- muy + sdy*fitbcf$m_est_post
+      yhat_post_est <- mu_post_est
+      if(!is.null(z_est)){
+        yhat_post_est <- mu_post_est + sweep(tau_post_est, 2, as.numeric(z_est), "*")
+      }
     } else {
-      tau_post_est <- NULL
+      tau_post_est  <- NULL
+      mu_post_est   <- NULL
+      yhat_post_est <- NULL
     }
     sigma_post = sdy*fitbcf$sigma
     mu_scale_post = sdy*fitbcf$msd
@@ -881,6 +923,33 @@ mbcf <- function(y,
     vi_mod_prop[nonzero, ] <- vi_mod_orig[nonzero, ] / row_totals[nonzero]
     
     #------------------------------------------------------------
+    # Same treatment for the coverage-weighted companion, when requested.
+    # vi_mod weights each internal node by getn0(), which for an internal node
+    # is only correct as of the last birth/death there and drifts as the imputed
+    # x moves. vi_mod_cov weights by coverage recomputed from the current x at
+    # every save. Comparing the two says how much, if at all, the n0 staleness
+    # moves the reported variable importance.
+    #------------------------------------------------------------
+    vi_mod_cov_orig <- NULL
+    vi_mod_cov_prop <- NULL
+    if (vi_coverage && !is.null(fitbcf$vi_mod_cov)) {
+      vic_raw <- fitbcf$vi_mod_cov
+      if (na_seqreg | na_mia) {
+        vic_full_perm <- matrix(0, nrow = ncol(x), ncol = 4)
+        vic_full_perm[which(wmv_ord), ] <- vic_raw
+        vic_full_orig <- vic_full_perm[order(perm_miss), , drop = FALSE]
+        vi_mod_cov_orig <- vic_full_orig[mod_cols, , drop = FALSE]
+      } else {
+        vi_mod_cov_orig <- vic_raw
+      }
+      colnames(vi_mod_cov_orig) <- c("value_seqreg", "mia1", "mia2", "pattern")
+      rownames(vi_mod_cov_orig) <- rownames(vi_mod_orig)
+      rt <- rowSums(vi_mod_cov_orig)
+      vi_mod_cov_prop <- vi_mod_cov_orig
+      vi_mod_cov_prop[rt > 0, ] <- vi_mod_cov_orig[rt > 0, ] / rt[rt > 0]
+    }
+    
+    #------------------------------------------------------------
     # mTreeSHAP post-processing
     #
     # C++ returns SHAP on the standardised-y scale, with rows in the
@@ -891,6 +960,8 @@ mbcf <- function(y,
     #------------------------------------------------------------
     shap_mod_out <- NULL
     shap_con_out <- NULL
+    shap_mod_est_out <- NULL
+    shap_con_est_out <- NULL
     
     if(compute_shap && !is.null(fitbcf$shap)){
       
@@ -898,11 +969,12 @@ mbcf <- function(y,
       K  <- sh$n_draws
       row_order <- order(perm)
       
-      .shap_pp <- function(acc, col_map, col_names, mask, base_offset = 0){
+      .shap_pp <- function(acc, col_map, col_names, mask, base_offset = 0,
+                           rows = row_order){
         if(is.null(acc)) return(NULL)
         if(K < 1) return(NULL)
         take <- function(M) {
-          M <- M[row_order, col_map, drop = FALSE]
+          M <- M[rows, col_map, drop = FALSE]
           dimnames(M) <- list(NULL, col_names)
           M
         }
@@ -931,11 +1003,12 @@ mbcf <- function(y,
         }
         out$baseline <- base_offset + sdy * as.numeric(acc$baseline)[seq_len(K)]
         if(!is.null(acc$draws)){
-          D <- sdy * acc$draws[row_order, col_map, seq_len(K), drop = FALSE]
+          D <- sdy * acc$draws[rows, col_map, seq_len(K), drop = FALSE]
           dimnames(D) <- list(NULL, col_names, NULL)
           out$draws <- D
         }
         if(!is.null(acc$max_err)) out$max_err <- as.numeric(acc$max_err)[seq_len(K)]
+        if(!is.null(acc$n_undef)) out$n_undef <- as.numeric(acc$n_undef)[rows]
         out$n_draws <- K
         out$thin    <- sh$thin
         out$iters   <- as.integer(sh$iters)[seq_len(K)]
@@ -945,10 +1018,11 @@ mbcf <- function(y,
       var_names <- colnames(x)
       if(is.null(var_names)) var_names <- paste0("x", seq_len(ncol(x)))
       
+      # C++ moderate-tree features are the mod columns of x_ord, in x_ord order;
+      # their original indices are perm_miss[which(wmv_ord)]
+      orig_idx <- perm_miss[which(wmv_ord)]
+      
       if(shap_mod && !is.null(sh$mod)){
-        # C++ moderate-tree features are the mod columns of x_ord, in x_ord order;
-        # their original indices are perm_miss[which(wmv_ord)]
-        orig_idx <- perm_miss[which(wmv_ord)]
         shap_mod_out <- .shap_pp(sh$mod,
                                  col_map   = match(mod_cols, orig_idx),
                                  col_names = var_names[mod_cols],
@@ -961,12 +1035,47 @@ mbcf <- function(y,
                                  mask        = (rr == 1),
                                  base_offset = muy)
       }
+      
+      # x_est rows. These are NOT row-permuted inside C++ (only the training
+      # rows are reordered by treatment), so row_order must not be applied.
+      if(shap_est && !is.null(sh$mod_est)){
+        shap_mod_est_out <- .shap_pp(sh$mod_est,
+                                     col_map   = match(mod_cols, orig_idx),
+                                     col_names = var_names[mod_cols],
+                                     mask      = (rr_est[, mod_cols, drop = FALSE] == 1),
+                                     rows      = seq_len(nrow(x_est)))
+      }
+      if(shap_est && !is.null(sh$con_est)){
+        shap_con_est_out <- .shap_pp(sh$con_est,
+                                     col_map     = order(perm_miss),
+                                     col_names   = var_names,
+                                     mask        = (rr_est == 1),
+                                     base_offset = muy,
+                                     rows        = seq_len(nrow(x_est)))
+      }
+      
+      # Warn about test rows whose attribution is not well defined: their path
+      # reaches a node with no training coverage at some draw, so the
+      # path-dependent conditional expectation does not exist there and local
+      # accuracy fails for that row. See shap.h.
+      for(nm in c("mod_est","con_est")){
+        if(!is.null(sh[[nm]]$n_undef)){
+          nu <- as.numeric(sh[[nm]]$n_undef)
+          if(any(nu > 0))
+            warning(sum(nu > 0), " of ", length(nu), " x_est rows reached a node with ",
+                    "zero training coverage in at least one SHAP draw (",
+                    nm, "). Their attributions do not sum to the prediction; see ",
+                    "the n_undef element for per-row counts.")
+        }
+      }
     }
     
     list(yhat = yhat_post,
          mu_post = mu_post,
          tau_post = tau_post,
          tau_post_est = tau_post_est,
+         mu_post_est = mu_post_est,        # NULL unless x_est supplied
+         yhat_post_est = yhat_post_est,    # uses z_est when supplied, else control
          sigma_post = sigma_post,
          mu_scale_post = mu_scale_post,
          tau_scale_post = tau_scale_post,
@@ -977,8 +1086,14 @@ mbcf <- function(y,
          vi_mod_prop = vi_mod_prop,  # row-normalised proportions
          shap_mod = shap_mod_out,    # SHAP for tau(x); NULL unless requested
          shap_con = shap_con_out,    # SHAP for mu(x);  NULL unless requested
+         shap_mod_est = shap_mod_est_out,  # same, on x_est, training coverage
+         shap_con_est = shap_con_est_out,
+         shap_seconds = if(compute_shap) fitbcf$shap$seconds else NULL,
+         vi_mod_cov = vi_mod_cov_orig,
+         vi_mod_cov_prop = vi_mod_cov_prop,
          na_mask = if(compute_shap) (rr == 1) else NULL,
+         na_mask_est = if(compute_shap && !is.null(x_est)) (rr_est == 1) else NULL,
          mod_cols = mod_cols)
   }
   
-}
+}

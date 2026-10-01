@@ -158,24 +158,59 @@ double baseline(Node* n)
 int failures = 0;
 const double TOL = 1e-9;
 
-void check_tree(const char* name, Node* root, const std::vector<Row>& rows, int p)
+// does this row's own path stay inside the support of the coverage rows?
+bool path_defined(Node* n, const Row& row)
 {
-  accumulate_cover(root, rows);
+  while(true) {
+    if(n->cover <= 0) return false;
+    if(n->leaf) return true;
+    n = sendleft_ref(row.x[n->var], row.r[n->var], n->cut, n->na) ? n->l : n->r;
+  }
+}
+
+// cov_rows define node coverage (the training set); eval_rows are attributed
+// (training or test). Passing the same vector twice is the in-sample case.
+// cov_rows define node coverage (the training set); eval_rows are attributed
+// (training or test). Passing the same vector twice is the in-sample case.
+//
+// Rows whose path leaves the support of cov_rows are excluded from both
+// comparisons and counted instead. For such a row E[f | x_S] involves 0/0 at
+// the unreachable node, so it has no value to be correct about: the brute-force
+// reference happens to return the leaf value while the implementation
+// contributes nothing, and neither convention is more right than the other.
+// What matters, and what expect_undef checks, is that those rows are FLAGGED
+// rather than reported as if they were fine.
+void check_tree2(const char* name, Node* root,
+                 const std::vector<Row>& cov_rows,
+                 const std::vector<Row>& eval_rows, int p,
+                 size_t expect_undef = 0)
+{
+  accumulate_cover(root, cov_rows);
   double worst_shap = 0.0, worst_eff = 0.0;
-  for(size_t i=0;i<rows.size();++i) {
-    std::vector<double> a = treeshap(root, rows[i], p);
-    std::vector<double> b = brute_force(root, rows[i], p);
+  size_t n_undef = 0, n_checked = 0;
+  for(size_t i=0;i<eval_rows.size();++i) {
+    if(!path_defined(root, eval_rows[i])) { ++n_undef; continue; }
+    ++n_checked;
+    std::vector<double> a = treeshap(root, eval_rows[i], p);
+    std::vector<double> b = brute_force(root, eval_rows[i], p);
     double s = baseline(root);
     for(int j=0;j<p;++j) {
       worst_shap = std::max(worst_shap, std::fabs(a[j]-b[j]));
       s += a[j];
     }
-    worst_eff = std::max(worst_eff, std::fabs(s - predict(root, rows[i])));
+    worst_eff = std::max(worst_eff, std::fabs(s - predict(root, eval_rows[i])));
   }
-  const bool ok = (worst_shap < TOL) && (worst_eff < TOL);
+  const bool ok = (worst_shap < TOL) && (worst_eff < TOL) &&
+                  (n_undef == expect_undef);
   if(!ok) ++failures;
-  printf("%-34s  n=%2zu p=%d   max|shap-brute| = %.3e   max efficiency err = %.3e   %s\n",
-         name, rows.size(), p, worst_shap, worst_eff, ok ? "PASS" : "FAIL");
+  printf("%-34s  checked=%2zu p=%d   max|shap-brute| = %.3e   max eff err = %.3e   undef=%zu/%zu   %s\n",
+         name, n_checked, p, worst_shap, worst_eff, n_undef, expect_undef,
+         ok ? "PASS" : "FAIL");
+}
+
+void check_tree(const char* name, Node* root, const std::vector<Row>& rows, int p)
+{
+  check_tree2(name, root, rows, rows, p, 0);
 }
 
 std::vector<Row> make_rows(int p, int n, unsigned seed, double pmiss)
@@ -268,6 +303,56 @@ int main()
   {
     Node* t = new Node(0.42);
     check_tree("stump", t, make_rows(2, 10, 8, 0.2), 2);
+  }
+
+  // ---- out-of-sample: coverage from the training rows, SHAP on test rows ----
+  printf("\ncoverage from training rows, SHAP evaluated on test rows\n");
+  printf("----------------------------------------------\n");
+
+  // 9. test rows from the same distribution, no missingness
+  {
+    Node* t = new Node(0, 0.5, 0,
+                new Node(1, 0.5, 0, new Node(1.0), new Node(-2.0)),
+                new Node(2, 0.5, 0, new Node(3.0), new Node(0.5)));
+    check_tree2("out-of-sample, value splits", t,
+                make_rows(3, 200, 11, 0.0), make_rows(3, 40, 12, 0.0), 3);
+  }
+
+  // 10. test rows with missingness, all four split rules in the tree
+  {
+    Node* t =
+      new Node(0, 0.5, 1,
+        new Node(1, 0.5, 0,
+          new Node(2, 0.5, 3, new Node(1.0), new Node(-1.0)),
+          new Node(3, 0.5, 2, new Node(0.5), new Node(2.5))),
+        new Node(2, 0.3, 0,
+          new Node(0, 0.8, 0, new Node(-2.0), new Node(0.75)),
+          new Node(1.25)));
+    check_tree2("out-of-sample, all four rules", t,
+                make_rows(4, 300, 13, 0.4), make_rows(4, 60, 14, 0.4), 4);
+  }
+
+  // 11. test rows with a DIFFERENT missingness rate from the training rows:
+  //     the background distribution is the training one, which is the point
+  {
+    Node* t = new Node(0, 0.5, 1,
+                new Node(1, 0.4, 3, new Node(2.0), new Node(-1.0)),
+                new Node(1, 0.6, 0, new Node(0.25), new Node(-0.75)));
+    check_tree2("out-of-sample, shifted missingness", t,
+                make_rows(2, 300, 15, 0.15), make_rows(2, 60, 16, 0.6), 2);
+  }
+
+  // 12. test rows that reach a leaf no training row reaches: attribution is
+  //     undefined there and must be FLAGGED, not silently wrong
+  {
+    Node* t = new Node(0, 0.5, 0,
+                new Node(1, 0.5, 0, new Node(1.0), new Node(-2.0)),
+                new Node(9.0));
+    std::vector<Row> tr = make_rows(2, 100, 17, 0.0);
+    for(size_t i=0;i<tr.size();++i) tr[i].x[0] = 0.1;        // training all left
+    std::vector<Row> te = make_rows(2, 40, 18, 0.0);
+    for(size_t i=0;i<te.size();++i) te[i].x[0] = 0.9;        // test all right
+    check_tree2("out-of-sample, unreachable leaf", t, tr, te, 2, /*expect_undef=*/40);
   }
 
   printf("----------------------------------------------\n");

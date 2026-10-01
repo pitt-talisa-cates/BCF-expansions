@@ -12,8 +12,8 @@ Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
 // mbcf_cpp
-List mbcf_cpp(NumericVector y_, NumericVector z_, NumericVector x_, NumericVector rr_, NumericVector vcol_mod_, List x_info_list, NumericVector rr_info_list, NumericVector x_est_, NumericVector rr_est_, arma::mat random_des, arma::mat random_var, arma::mat random_var_ix, double random_var_df, int burn, int nd, int thin, int ntree_mod, int ntree_con, bool bugtest, double lambda, double nu, double con_sd, double mod_sd, double con_alpha, double con_beta, double mod_alpha, double mod_beta, CharacterVector treef_name_, List na_stuff, NumericVector na_seqreg_modtyp, double na_prob_pm_con, double na_prob_pm_mod, NumericVector yrr_, bool na_mia, bool na_seqreg, bool check_node_missing, double trt_init, int status_interval, bool use_mscale, bool use_bscale, bool b_half_normal, double min_node, bool compute_shap, bool shap_mod, bool shap_con, int shap_thin, bool shap_var, bool shap_store_draws, bool shap_check);
-RcppExport SEXP _mbcf_mbcf_cpp(SEXP y_SEXP, SEXP z_SEXP, SEXP x_SEXP, SEXP rr_SEXP, SEXP vcol_mod_SEXP, SEXP x_info_listSEXP, SEXP rr_info_listSEXP, SEXP x_est_SEXP, SEXP rr_est_SEXP, SEXP random_desSEXP, SEXP random_varSEXP, SEXP random_var_ixSEXP, SEXP random_var_dfSEXP, SEXP burnSEXP, SEXP ndSEXP, SEXP thinSEXP, SEXP ntree_modSEXP, SEXP ntree_conSEXP, SEXP bugtestSEXP, SEXP lambdaSEXP, SEXP nuSEXP, SEXP con_sdSEXP, SEXP mod_sdSEXP, SEXP con_alphaSEXP, SEXP con_betaSEXP, SEXP mod_alphaSEXP, SEXP mod_betaSEXP, SEXP treef_name_SEXP, SEXP na_stuffSEXP, SEXP na_seqreg_modtypSEXP, SEXP na_prob_pm_conSEXP, SEXP na_prob_pm_modSEXP, SEXP yrr_SEXP, SEXP na_miaSEXP, SEXP na_seqregSEXP, SEXP check_node_missingSEXP, SEXP trt_initSEXP, SEXP status_intervalSEXP, SEXP use_mscaleSEXP, SEXP use_bscaleSEXP, SEXP b_half_normalSEXP, SEXP min_nodeSEXP, SEXP compute_shapSEXP, SEXP shap_modSEXP, SEXP shap_conSEXP, SEXP shap_thinSEXP, SEXP shap_varSEXP, SEXP shap_store_drawsSEXP, SEXP shap_checkSEXP) {
+List mbcf_cpp(NumericVector y_, NumericVector z_, NumericVector x_, NumericVector rr_, NumericVector vcol_mod_, List x_info_list, NumericVector rr_info_list, NumericVector x_est_, NumericVector rr_est_, arma::mat random_des, arma::mat random_var, arma::mat random_var_ix, double random_var_df, int burn, int nd, int thin, int ntree_mod, int ntree_con, bool bugtest, double lambda, double nu, double con_sd, double mod_sd, double con_alpha, double con_beta, double mod_alpha, double mod_beta, CharacterVector treef_name_, List na_stuff, NumericVector na_seqreg_modtyp, double na_prob_pm_con, double na_prob_pm_mod, bool na_mia, bool na_seqreg, bool check_node_missing, double trt_init, int status_interval, bool use_mscale, bool use_bscale, bool b_half_normal, double min_node, bool compute_shap, bool shap_mod, bool shap_con, int shap_thin, bool shap_var, bool shap_store_draws, bool shap_check, bool shap_est, bool vi_coverage);
+RcppExport SEXP _mbcf_mbcf_cpp(SEXP y_SEXP, SEXP z_SEXP, SEXP x_SEXP, SEXP rr_SEXP, SEXP vcol_mod_SEXP, SEXP x_info_listSEXP, SEXP rr_info_listSEXP, SEXP x_est_SEXP, SEXP rr_est_SEXP, SEXP random_desSEXP, SEXP random_varSEXP, SEXP random_var_ixSEXP, SEXP random_var_dfSEXP, SEXP burnSEXP, SEXP ndSEXP, SEXP thinSEXP, SEXP ntree_modSEXP, SEXP ntree_conSEXP, SEXP bugtestSEXP, SEXP lambdaSEXP, SEXP nuSEXP, SEXP con_sdSEXP, SEXP mod_sdSEXP, SEXP con_alphaSEXP, SEXP con_betaSEXP, SEXP mod_alphaSEXP, SEXP mod_betaSEXP, SEXP treef_name_SEXP, SEXP na_stuffSEXP, SEXP na_seqreg_modtypSEXP, SEXP na_prob_pm_conSEXP, SEXP na_prob_pm_modSEXP, SEXP na_miaSEXP, SEXP na_seqregSEXP, SEXP check_node_missingSEXP, SEXP trt_initSEXP, SEXP status_intervalSEXP, SEXP use_mscaleSEXP, SEXP use_bscaleSEXP, SEXP b_half_normalSEXP, SEXP min_nodeSEXP, SEXP compute_shapSEXP, SEXP shap_modSEXP, SEXP shap_conSEXP, SEXP shap_thinSEXP, SEXP shap_varSEXP, SEXP shap_store_drawsSEXP, SEXP shap_checkSEXP, SEXP shap_estSEXP, SEXP vi_coverageSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -49,7 +49,6 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< NumericVector >::type na_seqreg_modtyp(na_seqreg_modtypSEXP);
     Rcpp::traits::input_parameter< double >::type na_prob_pm_con(na_prob_pm_conSEXP);
     Rcpp::traits::input_parameter< double >::type na_prob_pm_mod(na_prob_pm_modSEXP);
-    Rcpp::traits::input_parameter< NumericVector >::type yrr_(yrr_SEXP);
     Rcpp::traits::input_parameter< bool >::type na_mia(na_miaSEXP);
     Rcpp::traits::input_parameter< bool >::type na_seqreg(na_seqregSEXP);
     Rcpp::traits::input_parameter< bool >::type check_node_missing(check_node_missingSEXP);
@@ -66,7 +65,9 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< bool >::type shap_var(shap_varSEXP);
     Rcpp::traits::input_parameter< bool >::type shap_store_draws(shap_store_drawsSEXP);
     Rcpp::traits::input_parameter< bool >::type shap_check(shap_checkSEXP);
-    rcpp_result_gen = Rcpp::wrap(mbcf_cpp(y_, z_, x_, rr_, vcol_mod_, x_info_list, rr_info_list, x_est_, rr_est_, random_des, random_var, random_var_ix, random_var_df, burn, nd, thin, ntree_mod, ntree_con, bugtest, lambda, nu, con_sd, mod_sd, con_alpha, con_beta, mod_alpha, mod_beta, treef_name_, na_stuff, na_seqreg_modtyp, na_prob_pm_con, na_prob_pm_mod, yrr_, na_mia, na_seqreg, check_node_missing, trt_init, status_interval, use_mscale, use_bscale, b_half_normal, min_node, compute_shap, shap_mod, shap_con, shap_thin, shap_var, shap_store_draws, shap_check));
+    Rcpp::traits::input_parameter< bool >::type shap_est(shap_estSEXP);
+    Rcpp::traits::input_parameter< bool >::type vi_coverage(vi_coverageSEXP);
+    rcpp_result_gen = Rcpp::wrap(mbcf_cpp(y_, z_, x_, rr_, vcol_mod_, x_info_list, rr_info_list, x_est_, rr_est_, random_des, random_var, random_var_ix, random_var_df, burn, nd, thin, ntree_mod, ntree_con, bugtest, lambda, nu, con_sd, mod_sd, con_alpha, con_beta, mod_alpha, mod_beta, treef_name_, na_stuff, na_seqreg_modtyp, na_prob_pm_con, na_prob_pm_mod, na_mia, na_seqreg, check_node_missing, trt_init, status_interval, use_mscale, use_bscale, b_half_normal, min_node, compute_shap, shap_mod, shap_con, shap_thin, shap_var, shap_store_draws, shap_check, shap_est, vi_coverage));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -150,7 +151,7 @@ END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_mbcf_mbcf_cpp", (DL_FUNC) &_mbcf_mbcf_cpp, 49},
+    {"_mbcf_mbcf_cpp", (DL_FUNC) &_mbcf_mbcf_cpp, 50},
     {"_mbcf_rcpparma_hello_world", (DL_FUNC) &_mbcf_rcpparma_hello_world, 0},
     {"_mbcf_rcpparma_outerproduct", (DL_FUNC) &_mbcf_rcpparma_outerproduct, 1},
     {"_mbcf_rcpparma_innerproduct", (DL_FUNC) &_mbcf_rcpparma_innerproduct, 1},

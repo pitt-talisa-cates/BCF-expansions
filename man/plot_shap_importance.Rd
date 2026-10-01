@@ -4,19 +4,15 @@
 \alias{plot_shap_importance}
 \title{Paired bar chart of SHAP importance by missingness stratum}
 \usage{
-plot_shap_importance(
-  fit,
-  var_names = NULL,
-  which = c("mod", "con"),
-  max_vars = 20
-)
+plot_shap_importance(fit, var_names = NULL, which = .shap_which, max_vars = 20)
 }
 \arguments{
 \item{fit}{Object returned by \code{mbcf()}}
 
 \item{var_names}{Optional covariate labels}
 
-\item{which}{"mod" for tau(x), "con" for mu(x)}
+\item{which}{"mod" or "con" for tau(x) or mu(x) on the training rows;
+"mod_est" or "con_est" for the same on the x_est rows}
 
 \item{max_vars}{Show at most this many covariates, by decreasing importance}
 }

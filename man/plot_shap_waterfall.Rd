@@ -8,7 +8,7 @@ plot_shap_waterfall(
   fit,
   i,
   var_names = NULL,
-  which = c("mod", "con"),
+  which = .shap_which,
   max_vars = 12
 )
 }
@@ -19,7 +19,8 @@ plot_shap_waterfall(
 
 \item{var_names}{Optional covariate labels}
 
-\item{which}{"mod" for tau(x), "con" for mu(x)}
+\item{which}{"mod" or "con" for tau(x) or mu(x) on the training rows;
+"mod_est" or "con_est" for the same on the x_est rows}
 
 \item{max_vars}{Show at most this many covariates, by decreasing |SHAP|}
 }

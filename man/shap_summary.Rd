@@ -4,7 +4,7 @@
 \alias{shap_summary}
 \title{Per-variable SHAP importance, overall and stratified by missingness}
 \usage{
-shap_summary(fit, var_names = NULL, which = c("mod", "con"))
+shap_summary(fit, var_names = NULL, which = .shap_which)
 }
 \arguments{
 \item{fit}{Object returned by \code{mbcf()}}
@@ -14,7 +14,8 @@ carried by the SHAP matrices. Length must match the number of covariates
 for the requested function (\code{length(mod_cols)} for "mod",
 \code{ncol(x)} for "con").}
 
-\item{which}{"mod" for tau(x), "con" for mu(x)}
+\item{which}{"mod" or "con" for tau(x) or mu(x) on the training rows;
+"mod_est" or "con_est" for the same on the x_est rows}
 }
 \value{
 A data frame, one row per covariate, sorted by decreasing importance:
