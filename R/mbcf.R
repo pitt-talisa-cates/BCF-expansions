@@ -89,10 +89,6 @@
 #' or "both" are HIGHLY recommended with observational data.
 #' @param use_muscale Use a half-Cauchy hyperprior on the scale of mu.
 #' @param use_tauscale Use a half-Normal prior on the scale of tau.
-#' @param z_est Optional treatment indicator for the \code{x_est} rows. When
-#'   supplied, \code{yhat_post_est} is the prediction under each test row's own
-#'   treatment value; otherwise it is the control-arm prediction
-#'   \code{mu_post_est}.
 #' @param shap_est Also attribute the \code{x_est} rows, using node coverage
 #'   from the TRAINING rows. The background distribution, and therefore the
 #'   baseline, is identical to the in-sample case, which is what makes in-sample
@@ -231,7 +227,6 @@ mbcf <- function(y,
                  x, 
                  mod_cols = 1:ncol(x), 
                  x_est=NULL,
-                 z_est=NULL,
                  
                  nburn, 
                  nsim, 
@@ -282,11 +277,6 @@ mbcf <- function(y,
   #browser()
   if (!is.matrix(x)) stop("x must be a matrix")
   if (!is.null(x_est) && !is.matrix(x_est)) stop("x_est must be a matrix when provided")
-  if (!is.null(z_est)) {
-    if (is.null(x_est)) stop("z_est supplied without x_est")
-    if (length(z_est) != nrow(x_est)) stop("z_est must have one entry per row of x_est")
-    if (any(is.na(z_est))) stop("z_est must not contain NA")
-  }
   
   #------------------------------------------------------------
   # Missing outcomes are not supported. Drawing y from its fully conditional
@@ -339,7 +329,9 @@ mbcf <- function(y,
   # x_est must carry ALL of x's columns, not just the moderators: the control
   # trees split on every column, and mbcf_cpp() recovers the number of test rows
   # as length(x_est_)/p_con. The old check compared against length(mod_cols),
-  # which coincides with ncol(x) only when every column is a moderator.
+  # which coincides with ncol(x) only when every column is a moderator. With a
+  # strict subset it either rejected a correct call or, if satisfied, made the
+  # C++ infer the wrong n_est and read past the end of the array.
   if (!is.null(x_est) && !.ident(ncol(x), ncol(x_est))) {
     stop("Data size mismatch. x_est must have one column per column of x, ",
          "including non-moderators.\n",
@@ -868,20 +860,19 @@ mbcf <- function(y,
     yhat_post = muy + sdy*fitbcf$yhat_post[,order(perm)]
     mu_post = muy + sdy*fitbcf$m_post[,order(perm)]
     tau_post = sdy*fitbcf$b_post[,order(perm)]
+    # Output rules, per Victor's 2026-10 comments:
+    #   mu draws are saved for train AND test, always
+    #   CATE draws are saved for train AND test
+    #   yhat is saved for TRAIN only. There is deliberately no test-set yhat:
+    #     predicting y for a test row requires assuming a treatment value for
+    #     it, which we never want to do. A user who wants the prognostic
+    #     prediction for a test row wants mu_post_est, which is exactly that.
     if(!is.null(x_est)){
       tau_post_est <- sdy*fitbcf$b_est_post
-      # mu(x) at x_est is now available, so the test set gets a yhat as well.
-      # yhat_post_est is the prediction under each row's OWN treatment value
-      # when z_est is supplied, and under control otherwise.
       mu_post_est  <- muy + sdy*fitbcf$m_est_post
-      yhat_post_est <- mu_post_est
-      if(!is.null(z_est)){
-        yhat_post_est <- mu_post_est + sweep(tau_post_est, 2, as.numeric(z_est), "*")
-      }
     } else {
-      tau_post_est  <- NULL
-      mu_post_est   <- NULL
-      yhat_post_est <- NULL
+      tau_post_est <- NULL
+      mu_post_est  <- NULL
     }
     sigma_post = sdy*fitbcf$sigma
     mu_scale_post = sdy*fitbcf$msd
@@ -1075,7 +1066,6 @@ mbcf <- function(y,
          tau_post = tau_post,
          tau_post_est = tau_post_est,
          mu_post_est = mu_post_est,        # NULL unless x_est supplied
-         yhat_post_est = yhat_post_est,    # uses z_est when supplied, else control
          sigma_post = sigma_post,
          mu_scale_post = mu_scale_post,
          tau_scale_post = tau_scale_post,
@@ -1096,4 +1086,4 @@ mbcf <- function(y,
          mod_cols = mod_cols)
   }
   
-}
+}
