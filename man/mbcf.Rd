@@ -10,7 +10,6 @@ mbcf(
   x,
   mod_cols = 1:ncol(x),
   x_est = NULL,
-  z_est = NULL,
   nburn,
   nsim,
   nthin = 1,
@@ -55,11 +54,6 @@ mbcf(
 \item{y}{Response variable}
 
 \item{z}{Treatment variable}
-
-\item{z_est}{Optional treatment indicator for the \code{x_est} rows. When
-supplied, \code{yhat_post_est} is the prediction under each test row's own
-treatment value; otherwise it is the control-arm prediction
-\code{mu_post_est}.}
 
 \item{nburn}{Number of burn-in MCMC iterations}
 
