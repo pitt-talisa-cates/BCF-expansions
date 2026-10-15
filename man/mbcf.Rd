@@ -6,7 +6,7 @@
 \usage{
 mbcf(
   y,
-  z,
+  z = NULL,
   x,
   mod_cols = 1:ncol(x),
   x_est = NULL,
@@ -47,6 +47,7 @@ mbcf(
   shap_check = FALSE,
   shap_est = FALSE,
   vi_coverage = FALSE,
+  estimate_cate = TRUE,
   bugtest = FALSE
 )
 }
@@ -137,6 +138,13 @@ coverage recomputed from the current imputed x at every save, returned as
 \code{getn0()}, which is only correct as of the last birth or death at that
 node, so comparing the two shows how much that staleness moves the reported
 variable importance. Costs one coverage pass per saved draw.}
+
+\item{estimate_cate}{When FALSE, fit the prognostic function mu(x) only: the
+moderate forest is not fitted at all, \code{z} must not be supplied, and
+\code{tau_post}, \code{tau_post_est} and \code{yhat_post} are NULL
+(\code{yhat} equals \code{mu} with no treatment term, so it is not
+duplicated). This is the prediction-only mode for users without a treatment
+variable. Default TRUE.}
 
 \item{x_control}{Design matrix for the "prognostic" function mu(x)}
 

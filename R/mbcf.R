@@ -103,6 +103,12 @@
 #'   \code{getn0()}, which is only correct as of the last birth or death at that
 #'   node, so comparing the two shows how much that staleness moves the reported
 #'   variable importance. Costs one coverage pass per saved draw.
+#' @param estimate_cate When FALSE, fit the prognostic function mu(x) only: the
+#'   moderate forest is not fitted at all, \code{z} must not be supplied, and
+#'   \code{tau_post}, \code{tau_post_est} and \code{yhat_post} are NULL
+#'   (\code{yhat} equals \code{mu} with no treatment term, so it is not
+#'   duplicated). This is the prediction-only mode for users without a treatment
+#'   variable. Default TRUE.
 #' @param compute_shap Master switch for mTreeSHAP. Default FALSE, since it adds
 #'   runtime for users who do not need attributions.
 #' @param shap_mod Compute SHAP for the treatment effect function tau(x). Default TRUE.
@@ -223,7 +229,7 @@
 #'}
 
 mbcf <- function(y, 
-                 z, 
+                 z = NULL, 
                  x, 
                  mod_cols = 1:ncol(x), 
                  x_est=NULL,
@@ -272,9 +278,27 @@ mbcf <- function(y,
                  shap_check=FALSE,
                  shap_est=FALSE,
                  vi_coverage=FALSE,
+                 estimate_cate=TRUE,
                  
                  bugtest=FALSE) {
   #browser()
+  #------------------------------------------------------------
+  # Prognostic-only mode. estimate_cate=FALSE fits mu(x) and nothing else: the
+  # moderate forest is not fitted at all and z is never used. Supplying z while
+  # asking not to estimate CATEs is treated as an error rather than silently
+  # ignored, since it almost always means the wrong argument was set.
+  #------------------------------------------------------------
+  if (!estimate_cate) {
+    if (!is.null(z)) {
+      stop("estimate_cate=FALSE fits the prognostic function only, so z is not ",
+           "used. Either drop z, or set estimate_cate=TRUE to estimate CATEs.")
+    }
+    z <- rep(0, length(y))
+  } else if (is.null(z)) {
+    stop("z is required unless estimate_cate=FALSE. With no treatment indicator ",
+         "there is nothing to identify tau(x) from.")
+  }
+  
   if (!is.matrix(x)) stop("x must be a matrix")
   if (!is.null(x_est) && !is.matrix(x_est)) stop("x_est must be a matrix when provided")
   
@@ -355,7 +379,11 @@ mbcf <- function(y,
   if(any(!is.finite(z))) stop("Non-numeric values in z")
   #if(any(!is.finite(x))) stop("Non-numeric values in x")
   #if(any(!is.finite(pihat))) stop("Non-numeric values in pihat")
-  if(!all(sort(unique(z)) == c(0,1))) stop("z must be a vector of 0's and 1's, with at least one of each")
+  # In prognostic-only mode z is the all-zero placeholder created above and is
+  # never used, so the usual requirement of at least one unit in each arm does
+  # not apply. order(z) at line ~794 is then a stable identity permutation.
+  if(estimate_cate && !all(sort(unique(z)) == c(0,1)))
+    stop("z must be a vector of 0's and 1's, with at least one of each")
   if(length(unique(y[!is.na(y)]))<5) warning("y appears to be discrete")
   if(nburn<0) stop("nburn must be non-negative")
   if(nsim<1) stop("nsim must be positive")
@@ -368,6 +396,10 @@ mbcf <- function(y,
   # mTreeSHAP argument checks
   #------------------------------------------------------------
   if(compute_shap){
+    if(!estimate_cate && shap_mod && !shap_con)
+      stop("compute_shap=TRUE with shap_mod=TRUE but estimate_cate=FALSE: there ",
+           "is no tau(x) to attribute. Set shap_con=TRUE for prognostic SHAP.")
+    if(!estimate_cate) shap_mod <- FALSE
     if(!shap_mod & !shap_con) stop("compute_shap=TRUE but both shap_mod and shap_con are FALSE")
     if(shap_thin < 1) stop("shap_thin must be a positive integer")
     shap_thin <- as.integer(shap_thin)
@@ -753,7 +785,9 @@ mbcf <- function(y,
   # sighat estimated after y initialization so that all n obs contribute
   if(is.null(lambda)) {
     if(is.null(sighat)) {
-      lmf = lm(yscale~z+x_ord)
+      # z is a constant-zero placeholder in prognostic-only mode, so including it
+      # would just give an aliased coefficient; drop it from the formula
+      lmf = if(estimate_cate) lm(yscale~z+x_ord) else lm(yscale~x_ord)
       sighat = summary(lmf)$sigma #sd(y) #summary(lmf)$sigma
     }
     qchi = qchisq(1.0-sigq,nu)
@@ -852,14 +886,22 @@ mbcf <- function(y,
                     shap_store_draws  = shap_store_draws,
                     shap_check        = shap_check,
                     shap_est          = shap_est,
-                    vi_coverage       = vi_coverage
+                    vi_coverage       = vi_coverage,
+                    estimate_cate     = estimate_cate
   )  
   if (bugtest){
     fitbcf
   } else {
-    yhat_post = muy + sdy*fitbcf$yhat_post[,order(perm)]
     mu_post = muy + sdy*fitbcf$m_post[,order(perm)]
-    tau_post = sdy*fitbcf$b_post[,order(perm)]
+    if(estimate_cate){
+      yhat_post = muy + sdy*fitbcf$yhat_post[,order(perm)]
+      tau_post  = sdy*fitbcf$b_post[,order(perm)]
+    } else {
+      # yhat == mu when there is no treatment effect term, so no separate
+      # object is returned for it (Victor's output rule 3)
+      yhat_post = NULL
+      tau_post  = NULL
+    }
     # Output rules, per Victor's 2026-10 comments:
     #   mu draws are saved for train AND test, always
     #   CATE draws are saved for train AND test
@@ -868,7 +910,7 @@ mbcf <- function(y,
     #     it, which we never want to do. A user who wants the prognostic
     #     prediction for a test row wants mu_post_est, which is exactly that.
     if(!is.null(x_est)){
-      tau_post_est <- sdy*fitbcf$b_est_post
+      tau_post_est <- if(estimate_cate) sdy*fitbcf$b_est_post else NULL
       mu_post_est  <- muy + sdy*fitbcf$m_est_post
     } else {
       tau_post_est <- NULL

@@ -98,7 +98,8 @@ List  mbcf_cpp(NumericVector y_,
                bool shap_store_draws=false,
                bool shap_check=false,
                bool shap_est=false,
-               bool vi_coverage=false
+               bool vi_coverage=false,
+               bool estimate_cate=true
 )
 {
   // ---- mTreeSHAP controls (see shap.h) ---------------------------------------
@@ -114,6 +115,21 @@ List  mbcf_cpp(NumericVector y_,
   // shap_est          also attribute the x_est rows, using TRAINING coverage
   // vi_coverage       additionally accumulate vi_mod weighted by refreshed node
   //                   coverage, for comparison against the n0-weighted version
+  //
+  // estimate_cate     FALSE fits the prognostic function ONLY: the moderate
+  //                   forest is not fitted at all and z is not used. This is the
+  //                   prediction-only mode, not a way of hiding tau from the
+  //                   output. It works because the control forest is already
+  //                   independent of treatment: it is updated with the
+  //                   homoskedastic bd()/drmu() and never reads z or bscale,
+  //                   whereas only the moderate forest uses bdhet()/drmuhet()
+  //                   with the precs weights. So this is a set of gates, not a
+  //                   rewrite. Two things do need explicit handling rather than
+  //                   just emptying loops, both marked [CATE GATE] below:
+  //                     - taking a pointer into an empty xtp_mod/rrtp_mod is
+  //                       undefined behaviour, so di_mod must not be built
+  //                     - the bscale update divides by allfit_mod, which is
+  //                       identically 0 here, so that block must be skipped
   //
   // NB keep the argument list above free of comments. Rcpp::compileAttributes()
   // flattens the signature onto one line, so a comment spanning more than one
@@ -581,6 +597,11 @@ List  mbcf_cpp(NumericVector y_,
     z_centered[i] = z_[i] - 0.5;
   }
   
+  // [CATE GATE] no moderate forest in prognostic-only mode. Setting ntree_mod to
+  // zero makes every `for(k=0; k<ntree_mod; k++)` loop over the moderate trees a
+  // no-op automatically, which covers most of the sampler for free.
+  if(!estimate_cate) ntree_mod = 0;
+  
   //initialize the trees
   std::vector<tree> t_mod(ntree_mod);
   for(int i=0; i<ntree_mod; i++) {
@@ -620,7 +641,11 @@ List  mbcf_cpp(NumericVector y_,
   pi_mod.pb = .5;                                                                 //prob of birth given  birth/death
   pi_mod.alpha = mod_alpha;                                                       //prob a bot node splits is alpha/(1+d)^beta, d is depth of node
   pi_mod.beta  = mod_beta;                                                        //2 for bart means it is harder to build big trees.
-  pi_mod.tau   = mod_sd/(sqrt(delta_mod)*sqrt((double) ntree_mod));               //sigma_mu, variance on leaf parameters  
+  // [CATE GATE] guard the division by sqrt(ntree_mod); the value is never used
+  // with no moderate trees, but leaving it as inf would be a trap
+  pi_mod.tau   = (ntree_mod > 0)
+    ? mod_sd/(sqrt(delta_mod)*sqrt((double) ntree_mod))
+    : 0.0;               //sigma_mu, variance on leaf parameters  
   pi_mod.sigma = shat;                                                            //resid variance is \sigma^2_y/bscale^2 in the backfitting update
   pi_mod.pr_pm = na_prob_pm_mod;
   
@@ -643,7 +668,11 @@ List  mbcf_cpp(NumericVector y_,
   //initialize the portion of yhat coming from b(x)
   double* allfit_mod = new double[n]; //sum of fit of all trees
   for(size_t i=0;i<n;i++) {
-    allfit_mod[i] = (z_[i]*bscale1 + (1-z_[i])*bscale0)*trt_init;
+    // [CATE GATE] identically zero with no moderate forest, so it flows
+    // harmlessly through r, allfit and the mscale update
+    allfit_mod[i] = estimate_cate
+      ? (z_[i]*bscale1 + (1-z_[i])*bscale0)*trt_init
+      : 0.0;
   }
   
   
@@ -667,11 +696,15 @@ List  mbcf_cpp(NumericVector y_,
   
   double* r_mod = new double[n];
   
+  // [CATE GATE] &(xtp_mod[0]) on an empty vector is undefined behaviour, so in
+  // prognostic-only mode di_mod stays empty rather than pointing at nothing.
+  // Nothing reads it: every consumer is inside a loop over the (zero) moderate
+  // trees or inside a block gated on estimate_cate.
   dinfo di_mod;
-  di_mod.n=n;
-  di_mod.p=p_mod;
-  di_mod.x = &(xtp_mod[0]);
-  di_mod.rr = &(rrtp_mod[0]);
+  di_mod.n = estimate_cate ? n : 0;
+  di_mod.p = estimate_cate ? p_mod : 0;
+  di_mod.x  = (estimate_cate && !xtp_mod.empty())  ? &(xtp_mod[0])  : nullptr;
+  di_mod.rr = (estimate_cate && !rrtp_mod.empty()) ? &(rrtp_mod[0]) : nullptr;
   di_mod.y = r_mod;
   
   
@@ -779,7 +812,8 @@ List  mbcf_cpp(NumericVector y_,
   /*****************************************************************************/
   
   if(shap_thin < 1) shap_thin = 1;
-  const bool do_shap_mod = compute_shap && shap_mod;
+  // [CATE GATE] no moderate forest means no tau attributions to compute
+  const bool do_shap_mod = compute_shap && shap_mod && estimate_cate;
   const bool do_shap_con = compute_shap && shap_con;
   if(compute_shap && !do_shap_mod && !do_shap_con)
     Rcpp::stop("compute_shap is TRUE but both shap_mod and shap_con are FALSE");
@@ -1493,7 +1527,14 @@ List  mbcf_cpp(NumericVector y_,
     //       r_i = (y_i-m(x_i))/b(x)
     // sums run over i:z_i=0 and i:z_i=1
     
-    if(use_bscale) {
+    // [CATE GATE] this block CANNOT be left to run with empty loops: it divides
+    // by allfit_mod, which is identically zero in prognostic-only mode, so it
+    // would produce NaN rather than simply doing nothing. Both scales stay at 0
+    // so that every (i<ntrt ? bscale1 : bscale0) elsewhere resolves consistently.
+    if(!estimate_cate) {
+      bscale0 = 0.0;
+      bscale1 = 0.0;
+    } else if(use_bscale) {
       
       double ww0 = 0.0, ww1 = 0.;
       double rw0 = 0.0, rw1 = 0.;
@@ -1567,6 +1608,7 @@ List  mbcf_cpp(NumericVector y_,
       bscale0 = -0.5;
       bscale1 =  0.5;
     }
+    if(!estimate_cate) { bscale0 = 0.0; bscale1 = 0.0; }
     pi_mod.sigma = sigma;
     pi_mod.sigma = sigma;
     
@@ -1824,13 +1866,18 @@ List  mbcf_cpp(NumericVector y_,
         yhat_post(save_ctr, i) = allfit[i];
       }
       // recover tau(x): allfit_mod stores bscale*b(x), divide out bscale and multiply by (bscale1-bscale0)
-      for(size_t i=0; i<n; i++) {
-        double bscale = (i<ntrt) ? bscale1 : bscale0;
-        b_post(save_ctr, i) = (bscale1-bscale0)*allfit_mod[i]/bscale;
+      // [CATE GATE] another place that divides rather than just loops: with both
+      // scales at 0 this is 0/0, so it has to be skipped rather than emptied.
+      if(estimate_cate) {
+        for(size_t i=0; i<n; i++) {
+          double bscale = (i<ntrt) ? bscale1 : bscale0;
+          b_post(save_ctr, i) = (bscale1-bscale0)*allfit_mod[i]/bscale;
+        }
       }
       if (have_est) {
         for (size_t i = 0; i < n_est; ++i) {
-          b_est_post(save_ctr, i) = (bscale1 - bscale0) * fit_i(i, t_mod, xi_mod, di_mod_est);
+          if(estimate_cate)
+            b_est_post(save_ctr, i) = (bscale1 - bscale0) * fit_i(i, t_mod, xi_mod, di_mod_est);
           m_est_post(save_ctr, i) = mscale * fit_i(i, t_con, xi_con, di_con_est);
         }
       }
@@ -1841,7 +1888,8 @@ List  mbcf_cpp(NumericVector y_,
       //xm1_post.push_back(*(na_tr_ptr[0][0]));
       //xm1_est_post.push_back(*(na_te_ptr[0][0]));
       
-      // Accumulate coverage-weighted VI for tau trees
+      // Accumulate coverage-weighted VI for tau trees. The loop is already a
+      // no-op at ntree_mod = 0, so prognostic-only mode needs nothing here.
       for(int k=0; k<ntree_mod; k++) {
         tree::cnpv all_nodes;
         t_mod[k].getnodes(all_nodes);
