@@ -18,7 +18,7 @@ The DESCRIPTION file:
 \author{
 \packageAuthor{mbcf}
 
-Maintainer: \packageMaintainer{imbcf}
+Maintainer: \packageMaintainer{mbcf}
 }
 \references{
 ~~ Literature or other references for background information ~~
